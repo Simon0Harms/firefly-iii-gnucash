@@ -331,6 +331,26 @@ $only = FireflyGnuCash\PayeeRules::load($rf);
 check('rule limited to the name after the last ";"', 'Bäcker Erika Muster' === ($only->match('Bäcker Erika Muster ( für 21.03)', [], '', [])[0] ?? null)
     && 'Bäcker Erika Muster' === ($only->match('KARTENZAHLUNG 2026-03-01; BÄCKEREI ERIKA MUSTER', [], '', [])[0] ?? null)
     && null === $only->match('ÜBERWEISUNG 6 SESAM - BÄCKER ERIKA MUSTER; MARTHA BEISPIEL', [], '', []));
+// rule assistant: patterns built from typed text (PayeeRules::build) and what they match
+$bt = static function (string $query, string $mode = 'words', bool $nameOnly = false) use ($rf): FireflyGnuCash\PayeeRules {
+    file_put_contents($rf, FireflyGnuCash\PayeeRules::build($query, $mode, $nameOnly)." => X\n");
+
+    return FireflyGnuCash\PayeeRules::load($rf);
+};
+$hits = static fn (FireflyGnuCash\PayeeRules $r, array $texts): array => array_values(array_filter($texts, static fn ($x) => null !== $r->match($x, [], '', [])));
+$route = ['DB Musterstadt(Nord) -> Beispielhausen', 'DB Beispieldorf -> Musterstadt', 'Beispieldorf -> Musterstadt', 'DBV Versicherung Musterstadt', 'Kauf DB Musterstadt'];
+check('build: words in order', '/\bDB\s+Musterstadt\b/i' === FireflyGnuCash\PayeeRules::build('  DB   Musterstadt ') && ['DB Musterstadt(Nord) -> Beispielhausen', 'Kauf DB Musterstadt'] === $hits($bt('DB Musterstadt'), $route), json_encode($hits($bt('DB Musterstadt'), $route)));
+check('build: all words, any order', ['DB Musterstadt(Nord) -> Beispielhausen', 'DB Beispieldorf -> Musterstadt', 'Kauf DB Musterstadt'] === $hits($bt('Musterstadt DB', 'all'), $route), json_encode($hits($bt('Musterstadt DB', 'all'), $route)));
+check('build: begins with', ['DB Musterstadt(Nord) -> Beispielhausen', 'DB Beispieldorf -> Musterstadt'] === $hits($bt('db', 'start'), $route), json_encode($hits($bt('db', 'start'), $route)));
+check('build: contains text, special characters', ['DB Musterstadt(Nord) -> Beispielhausen'] === $hits($bt('Musterstadt(Nord)', 'text'), $route) && 4 === count($hits($bt('->', 'text'), array_merge($route, ['A -> B']))));
+check('build: umlauts and whole words', '/\bbäcker\b/iu' === FireflyGnuCash\PayeeRules::build('bäcker') && ['BÄCKER Erika Muster'] === $hits($bt('bäcker'), ['BÄCKER Erika Muster', 'Feinbäcker Erika', 'xBäcker']));
+$bank = ['Bäcker Erika Muster ( für 21.03)', 'KARTENZAHLUNG 2026-03-01; BÄCKEREI ERIKA MUSTER', 'ÜBERWEISUNG 6 SESAM - BÄCKER ERIKA MUSTER; MARTHA BEISPIEL'];
+check('build: only the name after the last ";"', array_slice($bank, 0, 2) === $hits($bt('Erika Muster', 'words', true), $bank)
+    && array_slice($bank, 0, 2) === $hits($bt('Muster Erika', 'all', true), $bank) && [$bank[0]] === $hits($bt('Bäcker Erika', 'start', true), $bank)
+    && [$bank[1]] === $hits($bt('Bäckerei', 'start', true), $bank) && array_slice($bank, 0, 2) === $hits($bt('ERIKA MUSTER', 'text', true), $bank));
+check('build: readable escaping, "=>" inside the pattern', '/->/i' === FireflyGnuCash\PayeeRules::build('->', 'text') && '/\\bMusterstadt\\(Nord\\)/i' === FireflyGnuCash\PayeeRules::build('Musterstadt(Nord)')
+    && ['Kurs A => B'] === $hits($bt('=> B', 'text'), ['Kurs A => B', 'A = B']), FireflyGnuCash\PayeeRules::build('Musterstadt(Nord)'));
+check('build: IBAN and empty input', 'iban:DE89370400440532013000' === FireflyGnuCash\PayeeRules::build('DE89 3704 0044 0532 0130 00') && '' === FireflyGnuCash\PayeeRules::build('  '));
 check('settlement account detection', FireflyGnuCash\PayeeResolver::isSettlementAccount(['eBay.O.12.34567.89012/Luxembourg', 'GUTSCHR. UEBERWEISUNG', 'Visa.Geld.zurueck.Aktio'])
     && !FireflyGnuCash\PayeeResolver::isSettlementAccount(['BUNDESKASSE TRIER', 'BUNDESKASSE IN TRIER', 'BUNDESKASSE'])
     && !FireflyGnuCash\PayeeResolver::isSettlementAccount(['Millionenchance.de', 'insic GmbH']));

@@ -137,6 +137,31 @@ $t  = api('GET', '?a=table&what=map');
 $rewe = array_values(array_filter($t['rows'], static fn ($x) => str_starts_with($x['booking_text'], 'REWE Musterstadt')));
 check('rule applied after re-plan', 'ok' === ($st['job']['state'] ?? '') && 'REWE' === ($rewe[0]['payee'] ?? null), json_encode($rewe[0] ?? null));
 
+// ---- rule assistant
+$pv = static fn (array $b): array => api('POST', '?a=rulepreview', ['json' => $b]);
+$r  = $pv(['query' => 'REWE Musterstadt', 'mode' => 'words', 'target' => 'REWE Markt', 'position' => 'end']);
+check('assistant builds the rule', '/\bREWE\s+Musterstadt\b/i' === ($r['pattern'] ?? null) && str_contains((string) ($r['line'] ?? ''), '=> REWE Markt'), json_encode($r['pattern'] ?? $r));
+check('assistant: earlier rule keeps its texts at the end', ($r['totals']['texts'] ?? 0) > 0 && $r['totals']['kept'] === $r['totals']['bookings'] && 0 === $r['totals']['changed'], json_encode($r['totals'] ?? null));
+$r = $pv(['query' => 'REWE Musterstadt', 'mode' => 'words', 'target' => 'REWE Markt', 'position' => 'top']);
+check('assistant: before all rules it wins', ($r['totals']['changed'] ?? 0) === ($r['totals']['bookings'] ?? -1) && 'REWE Markt' === ($r['matches'][0]['new'] ?? null) && 'REWE' === ($r['matches'][0]['payee'] ?? null), json_encode($r['matches'][0] ?? null));
+$r = $pv(['query' => 'Musterstadt REWE', 'mode' => 'words', 'target' => 'X']);
+check('assistant: wrong order finds nothing, but similar texts', 0 === ($r['totals']['texts'] ?? -1) && [] !== ($r['similar'] ?? []), json_encode($r['similar'] ?? null));
+$r = $pv(['query' => 'Musterstadt REWE', 'mode' => 'all', 'target' => 'X', 'position' => 'top']);
+check('assistant: any order finds them', ($r['totals']['texts'] ?? 0) >= 2, json_encode($r['totals'] ?? null));
+$r = $pv(['rule' => '/broken(/i', 'target' => 'X']);
+check('assistant: invalid hand-written rule is reported', '' !== (string) ($r['error'] ?? '') && '' === (string) ($r['line'] ?? 'x'), json_encode($r));
+$r = $pv(['query' => 'Kiosk', 'target' => 'A => B']);
+check('assistant: "=>" in the name is refused', '' !== (string) ($r['error'] ?? ''));
+$r = $pv(['rule' => 'memo:/Brot/', 'target' => 'Bäcker']);
+check('assistant: memo rules get a note', [] !== ($r['notes'] ?? []) && null === $r['error']);
+$prows = api('GET', '?a=table&what=payees')['rows'] ?? [];
+$name  = (string) ($prows[0]['payee'] ?? '');
+$want  = array_sum(array_map(static fn ($x) => $x['payee'] === $name ? (int) $x['transactions'] : 0, $prows));
+$r     = $pv(['query' => 'Kiosk', 'target' => mb_strtoupper($name)]);
+check('assistant: existing counterparty is reported (case-insensitive)', $want > 0 && ($r['existing']['expense'] ?? 0) + ($r['existing']['revenue'] ?? 0) === $want, json_encode([$name, $want, $r['existing'] ?? null]));
+$r = $pv(['query' => '', 'target' => '']);
+check('assistant: empty input', '' === ($r['pattern'] ?? 'x') && [] === ($r['matches'] ?? ['x']));
+
 // ---- account mapping editor
 $c   = api('GET', '?a=text&what=config');
 $cfgData = json_decode((string) ($c['text'] ?? ''), true);

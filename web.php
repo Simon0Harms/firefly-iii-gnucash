@@ -807,6 +807,7 @@ function main(): void
             'table'       => apiTable($w),
             'suggestions' => json(['ok' => true, 'items' => $w->has('suggestions') ? readSuggestions($w->file('suggestions')) : []]),
             'text'        => apiText($w),
+            'rulepreview' => apiRulePreview($w),
             'dl'          => apiDownload($w),
             'upload'      => apiUpload($w),
             'save'        => apiSave($w),
@@ -990,6 +991,136 @@ function apiUpload(Workspace $w): never
     $w->saveMeta(['name' => '' === $name ? 'book.gnucash' : mb_substr($name, 0, 200), 'uploaded' => time(), 'edited' => time(), 'last' => []]);
     startPlan($w);
     json(['ok' => true]);
+}
+
+/** Options of the book's import.json (defaults of the tool for missing keys). */
+function bookOptions(Workspace $w): array
+{
+    loadTool();
+    $opt  = \FireflyGnuCash\ImportConfig::DEFAULT_OPTIONS;
+    $data = $w->has('config') ? json_decode((string) file_get_contents($w->file('config')), true) : null;
+
+    return \is_array($data['options'] ?? null) ? array_merge($opt, $data['options']) : $opt;
+}
+
+/**
+ * Rule assistant: builds a rule from typed text (or takes one written by hand) and shows which
+ * booking texts it catches and which counterparty they get. Based on the last calculation:
+ * a text already caught by an earlier rule keeps it unless the rule goes before all rules.
+ */
+function apiRulePreview(Workspace $w): never
+{
+    requirePost();
+    if (!$w->has('map')) {
+        throw new WebError(t('err.no_book'));
+    }
+    loadTool();
+    $b        = body();
+    $mode     = \in_array($b['mode'] ?? '', ['words', 'all', 'start', 'text'], true) ? (string) $b['mode'] : 'words';
+    $nameOnly = !empty($b['name_only']);
+    $query    = trim((string) ($b['query'] ?? ''));
+    $custom   = trim((string) ($b['rule'] ?? ''));
+    $target   = trim((string) ($b['target'] ?? ''));
+    $top      = 'top' === ($b['position'] ?? '');
+    $pattern  = '' !== $custom ? $custom : \FireflyGnuCash\PayeeRules::build($query, $mode, $nameOnly);
+    $out      = ['ok' => true, 'pattern' => $pattern, 'line' => '', 'error' => null, 'notes' => [], 'matches' => [], 'more' => 0, 'similar' => [],
+        'totals' => ['texts' => 0, 'bookings' => 0, 'changed' => 0, 'kept' => 0], 'affected' => [], 'names' => [], 'existing' => ['expense' => 0, 'revenue' => 0]];
+    if ('' === $pattern) {
+        json($out);
+    }
+    if (1 === preg_match('/[\r\n]/', $pattern.$target)) {
+        json(['error' => t('asst.err_newline')] + $out);
+    }
+    if (str_contains($target, '=>')) {
+        json(['error' => t('asst.err_arrow')] + $out);
+    }
+    $line        = sprintf('%-40s => %s', $pattern, $target);
+    $out['line'] = '' === $target ? '' : $line;
+    $tmp         = tempnam(sys_get_temp_dir(), 'ffgc');
+    file_put_contents($tmp, sprintf('%s => %s', $pattern, '' === $target ? 'X' : $target)."\n");
+    try {
+        $rules = \FireflyGnuCash\PayeeRules::load($tmp);
+    } catch (\Throwable $e) {
+        json(['error' => str_replace($tmp.':1: ', '', $e->getMessage()), 'line' => ''] + $out);
+    } finally {
+        @unlink($tmp);
+    }
+    $field = $rules->rules[0]['field'] ?? 'desc';
+    if ('memo' === $field) {
+        $out['notes'][] = t('asst.note_memo');
+    }
+    if ('category' === $field) {
+        $out['notes'][] = t('asst.note_category');
+    }
+    $opts     = bookOptions($w);
+    $fallback = (string) ($opts['payee_fallback'] ?? '(diverse)');
+    $side     = static fn (string $v): string => 1 === preg_match('/^(Ausgaben|expense)/i', $v) ? 'expense' : 'revenue';
+    $lower    = static fn (string $v): string => mb_strtolower($v, 'UTF-8');
+    $tokens   = array_values(array_filter(array_map($lower, preg_split('/\s+/u', $query) ?: []), static fn ($x) => '' !== $x));
+    $matches  = [];
+    $similar  = [];
+    $affected = [];
+    $names    = [];
+    foreach (readCsv($w->file('map')) as $r) {
+        $text  = (string) $r['booking_text'];
+        $cats  = '' === (string) $r['categories'] ? [''] : explode(' | ', (string) $r['categories']);
+        $ibans = array_values(array_filter(explode(' ', (string) $r['iban'])));
+        $hit   = null;
+        foreach ($cats as $c) {
+            if (null !== ($hit = $rules->match($text, $ibans, $c, []))) {
+                break;
+            }
+        }
+        $count = (int) $r['transactions'];
+        $sd    = $side((string) $r['firefly_type']);
+        if (null === $hit) {
+            if ([] !== $tokens && \count($similar) < 60) {
+                $lt = $lower($text);
+                if ([] === array_filter($tokens, static fn ($x) => !str_contains($lt, $x))) {
+                    $similar[] = ['text' => $text, 'side' => $sd, 'count' => $count, 'payee' => (string) $r['payee']];
+                }
+            }
+
+            continue;
+        }
+        $new = '-' === $hit[0] ? str_replace('{category}', $cats[0], $fallback) : $hit[0];
+        if ('' === $target) {
+            $new = '';
+        }
+        $kept = !$top && str_starts_with((string) $r['source'], 'rule');
+        $now  = (string) $r['payee'];
+        $to   = $kept ? $now : $new;
+        $chg  = '' !== $to && $lower($to) !== $lower($now);
+        $matches[] = ['text' => $text, 'side' => $sd, 'count' => $count, 'payee' => $now, 'source' => (string) $r['source'], 'new' => $to, 'kept' => $kept, 'changes' => $chg];
+        $out['totals']['texts']++;
+        $out['totals']['bookings'] += $count;
+        if ($kept) {
+            $out['totals']['kept'] += $count;
+        } elseif ($chg) {
+            $out['totals']['changed'] += $count;
+            $affected[$now.'|'.$sd] = ($affected[$now.'|'.$sd] ?? 0) + $count;
+        }
+        if ($now !== $fallback) {
+            $names[$now] = ($names[$now] ?? 0) + $count;
+        }
+    }
+    usort($matches, static fn ($a, $b) => [$b['count'], $a['text']] <=> [$a['count'], $b['text']]);
+    usort($similar, static fn ($a, $b) => [$b['count'], $a['text']] <=> [$a['count'], $b['text']]);
+    arsort($affected);
+    arsort($names);
+    $out['more']     = max(0, \count($matches) - 300);
+    $out['matches']  = \array_slice($matches, 0, 300);
+    $out['similar']  = \array_slice($similar, 0, 30);
+    $out['affected'] = array_map(static fn ($k, $n) => ['name' => explode('|', $k)[0], 'side' => explode('|', $k)[1], 'count' => $n], array_keys($affected), $affected);
+    $out['names']    = \array_slice(array_keys($names), 0, 8);
+    if ('' !== $target && $w->has('payees')) {
+        foreach (readCsv($w->file('payees')) as $r) {
+            if ($lower((string) $r['payee']) === $lower($target)) {
+                $out['existing'][$side((string) $r['firefly_type'])] += (int) $r['transactions'];
+            }
+        }
+    }
+    json($out);
 }
 
 function apiSave(Workspace $w): never
@@ -1291,7 +1422,57 @@ function textsDe(): array
         'src.rule_line'   => 'Regel (Zeile {n})',
         'src.rule_fallback' => 'Regel → Sammelkonto',
 
-        'sugg.help'       => 'Vom Tool erkannte Varianten desselben Gegenkontos. „Übernehmen“ hängt die Regel unten an deine Regeln an; danach im Reiter „Regeln“ speichern. Den Namen rechts von `=>` kannst du dort anpassen.',
+        'sub.assistant'   => 'Regel erstellen',
+        'asst.title'      => 'Regel erstellen',
+        'asst.help'       => 'Tippe einen Text aus deinen Buchungen ein, z. B. „DB Hamburg“. Darunter erscheint sofort die passende Regel und welche Buchungstexte sie erfasst – bevor du etwas speicherst.',
+        'asst.query'      => 'Suchtext',
+        'asst.query_ph'   => 'z. B. DB Hamburg',
+        'asst.mode'       => 'Suche',
+        'asst.mode_words' => 'Wörter in dieser Reihenfolge',
+        'asst.mode_all'   => 'alle Wörter, beliebige Reihenfolge',
+        'asst.mode_start' => 'Buchungstext beginnt damit',
+        'asst.mode_text'  => 'enthält den Text (auch in Wörtern)',
+        'asst.target'     => 'Gegenkonto in Firefly',
+        'asst.target_ph'  => 'z. B. Deutsche Bahn',
+        'asst.position'   => 'Einfügen',
+        'asst.pos_end'    => 'nach meinen Regeln',
+        'asst.pos_top'    => 'vor meinen Regeln (hat Vorrang)',
+        'asst.name_only'      => 'Nur im Empfängernamen (nach dem letzten „;“)',
+        'asst.name_only_help' => 'Für Bankbuchungen „Verwendungszweck; Name“: Überweisungen an jemand anderen, die den Text nur im Verwendungszweck nennen, bleiben unberührt.',
+        'asst.names'      => 'Name übernehmen:',
+        'asst.rule'       => 'Regel',
+        'asst.rule_custom'=> 'von Hand geändert',
+        'asst.rule_reset' => 'Aus Suchtext erzeugen',
+        'asst.line_label' => 'Diese Zeile kommt in deine Regeln:',
+        'asst.insert'     => 'Nur in den Editor',
+        'asst.save'       => 'Übernehmen & neu berechnen',
+        'asst.none'       => 'Kein Buchungstext passt zu dieser Regel.',
+        'asst.summary'    => 'Erfasst {texts} Buchungstexte mit {bookings} Buchungen.',
+        'asst.summary.one'=> 'Erfasst 1 Buchungstext mit {bookings} Buchungen.',
+        'asst.changed'    => '{n} Buchungen bekommen das Gegenkonto „{target}“.',
+        'asst.unchanged'  => 'Sie haben dieses Gegenkonto schon.',
+        'asst.kept'       => '{n} Buchungen behalten ihr Gegenkonto, weil eine frühere Regel greift. Mit „vor meinen Regeln“ hat diese Regel Vorrang.',
+        'asst.from'       => 'Bisher:',
+        'asst.existing'   => 'Das Gegenkonto „{name}“ gibt es schon ({n} Buchungen) – die Buchungen kommen dazu.',
+        'asst.need_target'=> 'Gib noch an, wie das Gegenkonto heißen soll.',
+        'asst.dup'        => 'Diese Regel steht schon in deinen Regeln (Zeile {n}).',
+        'asst.dirty'      => 'Der Regeleditor hat ungespeicherte Änderungen; die Vorschau zeigt den zuletzt berechneten Stand.',
+        'asst.matches'    => 'Erfasste Buchungstexte',
+        'asst.col_now'    => 'bisher',
+        'asst.col_new'    => 'neu',
+        'asst.kept_badge' => 'frühere Regel',
+        'asst.more'       => '… und {n} weitere Buchungstexte.',
+        'asst.similar'      => 'Ähnlich, aber nicht erfasst',
+        'asst.similar_help' => 'Diese Texte enthalten alle Suchwörter, passen aber nicht zur Regel – etwa wegen einer anderen Reihenfolge. Probier eine andere Suche.',
+        'asst.inserted'   => 'Regel eingefügt – im Reiter „Regeln“ speichern nicht vergessen.',
+        'asst.err_newline'=> 'Regel und Gegenkonto dürfen keinen Zeilenumbruch enthalten.',
+        'asst.err_arrow'  => 'Das Gegenkonto darf kein „=>“ enthalten.',
+        'asst.note_memo'  => 'memo:-Regeln kann die Vorschau nicht prüfen (die Memos stehen nicht in den Berichten).',
+        'asst.note_category' => 'Bei category:-Regeln ist die Vorschau ungefähr: ein Buchungstext zählt, wenn eine seiner Kategorien passt.',
+        'asst.open'       => 'Regel …',
+        'asst.open_title' => 'Regel für diesen Eintrag erstellen',
+        'sugg.adjust'     => 'Anpassen …',
+        'sugg.help'       => 'Vom Tool erkannte Varianten desselben Gegenkontos. „Übernehmen“ hängt die Regel unten an deine Regeln an (danach im Reiter „Regeln“ speichern); „Anpassen …“ öffnet sie zum Ändern im Reiter „Regel erstellen“ mit Vorschau.',
         'sugg.item'       => '{n} Buchungen: {names}',
         'sugg.adopt'      => 'Übernehmen',
         'sugg.added_label'=> 'Übernommen',
@@ -1592,7 +1773,57 @@ function textsEn(): array
         'src.rule_line'   => 'rule (line {n})',
         'src.rule_fallback' => 'rule → fallback',
 
-        'sugg.help'       => 'Variants of the same counterparty found by the tool. “Adopt” appends the rule to your rules; then save in the “Rules” tab. You can change the name right of `=>` there.',
+        'sub.assistant'   => 'Create rule',
+        'asst.title'      => 'Create a rule',
+        'asst.help'       => 'Type a text from your bookings, e.g. “DB Hamburg”. The matching rule and the booking texts it catches appear right away – before anything is saved.',
+        'asst.query'      => 'Search text',
+        'asst.query_ph'   => 'e.g. DB Hamburg',
+        'asst.mode'       => 'Search',
+        'asst.mode_words' => 'words in this order',
+        'asst.mode_all'   => 'all words, any order',
+        'asst.mode_start' => 'booking text starts with it',
+        'asst.mode_text'  => 'contains the text (also inside words)',
+        'asst.target'     => 'Counterparty in Firefly',
+        'asst.target_ph'  => 'e.g. Deutsche Bahn',
+        'asst.position'   => 'Insert',
+        'asst.pos_end'    => 'after my rules',
+        'asst.pos_top'    => 'before my rules (takes precedence)',
+        'asst.name_only'      => 'Only in the name of the recipient (after the last “;”)',
+        'asst.name_only_help' => 'For bank texts “purpose; name”: transfers to someone else that only mention the text in the purpose are left alone.',
+        'asst.names'      => 'Use name:',
+        'asst.rule'       => 'Rule',
+        'asst.rule_custom'=> 'edited by hand',
+        'asst.rule_reset' => 'Build from search text',
+        'asst.line_label' => 'This line goes into your rules:',
+        'asst.insert'     => 'Only into the editor',
+        'asst.save'       => 'Adopt & recalculate',
+        'asst.none'       => 'No booking text matches this rule.',
+        'asst.summary'    => 'Catches {texts} booking texts with {bookings} transactions.',
+        'asst.summary.one'=> 'Catches 1 booking text with {bookings} transactions.',
+        'asst.changed'    => '{n} transactions get the counterparty “{target}”.',
+        'asst.unchanged'  => 'They already have this counterparty.',
+        'asst.kept'       => '{n} transactions keep their counterparty because an earlier rule matches. Choose “before my rules” to give this rule precedence.',
+        'asst.from'       => 'So far:',
+        'asst.existing'   => 'The counterparty “{name}” already exists ({n} transactions) – these are added to it.',
+        'asst.need_target'=> 'Enter the name of the counterparty.',
+        'asst.dup'        => 'This rule is already in your rules (line {n}).',
+        'asst.dirty'      => 'The rules editor has unsaved changes; the preview shows the last calculated state.',
+        'asst.matches'    => 'Booking texts caught',
+        'asst.col_now'    => 'so far',
+        'asst.col_new'    => 'new',
+        'asst.kept_badge' => 'earlier rule',
+        'asst.more'       => '… and {n} more booking texts.',
+        'asst.similar'      => 'Similar, but not caught',
+        'asst.similar_help' => 'These texts contain all search words but do not match the rule – e.g. in another order. Try another search.',
+        'asst.inserted'   => 'Rule inserted – remember to save it in the “Rules” tab.',
+        'asst.err_newline'=> 'Rule and counterparty must not contain a line break.',
+        'asst.err_arrow'  => 'The counterparty must not contain “=>”.',
+        'asst.note_memo'  => 'The preview cannot check memo: rules (the memos are not in the reports).',
+        'asst.note_category' => 'For category: rules the preview is approximate: a booking text counts when one of its categories matches.',
+        'asst.open'       => 'Rule …',
+        'asst.open_title' => 'Create a rule for this entry',
+        'sugg.adjust'     => 'Adjust …',
+        'sugg.help'       => 'Variants of the same counterparty found by the tool. “Adopt” appends the rule to your rules (then save in the “Rules” tab); “Adjust …” opens it for changes in “Create rule” with a preview.',
         'sugg.item'       => '{n} transactions: {names}',
         'sugg.adopt'      => 'Adopt',
         'sugg.added_label'=> 'Adopted',
@@ -1910,6 +2141,8 @@ main { max-width: 1180px; margin: 0 auto; padding: 1rem 16px 3rem; }
 button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 label.field { display: flex; flex-direction: column; gap: .2rem; font-size: 13px; color: var(--muted); font-weight: 550; }
+label.field input, label.field select, label.field textarea { font-weight: 400; }
+label.field .badge { align-self: flex-start; }
 input[type=text], input[type=url], input[type=password], input[type=number], input[type=date], input[type=search], select, textarea {
   font: inherit; font-size: 14px; color: var(--text); background: var(--panel); border: 1px solid var(--border-strong); border-radius: 7px; padding: .4rem .55rem; min-width: 0; }
 input[readonly] { background: var(--panel-2); color: var(--muted); }
@@ -1982,6 +2215,21 @@ details[open] > summary { margin-bottom: .5rem; }
 .help { font-size: 13px; color: var(--muted); }
 .help code { background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; padding: 0 .3rem; font-size: 12.5px; }
 .help table td { border: 0; padding: .1rem .5rem .1rem 0; }
+.asst-grid { display: grid; grid-template-columns: minmax(170px, 1.5fr) minmax(250px, 1.3fr) minmax(190px, 1.5fr) minmax(260px, 1.2fr); gap: .7rem; }
+.chip i { font-style: normal; color: var(--faint); font-size: 12px; }
+@media (max-width: 900px) { .asst-grid { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 560px) { .asst-grid { grid-template-columns: 1fr; } }
+input.code { font-family: var(--mono); font-size: 13px; }
+.grow { flex: 1 1 auto; }
+pre.rule-line { margin: 0; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: .5rem .7rem; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 2.3rem; }
+pre.rule-line:empty { display: none; }
+td.arrow { color: var(--faint); padding-left: 0; padding-right: 0; }
+td.new { font-weight: 600; }
+tr.same td { color: var(--muted); }
+tr.same td.new { font-weight: 400; }
+.summary-line { margin: .25rem 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+td.act { width: 1%; white-space: nowrap; }
 .editor-grid { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 1rem; align-items: start; }
 @media (max-width: 900px) { .editor-grid { grid-template-columns: 1fr; } }
 .dirty-dot { width: .55rem; height: .55rem; border-radius: 50%; background: var(--warn); display: inline-block; }
@@ -2103,6 +2351,7 @@ footer.foot a { color: var(--muted); }
       <button type="button" role="tab" data-sub="payees" aria-selected="true"><?= $L('sub.payees') ?> <span class="badge" id="n-payees"></span></button>
       <button type="button" role="tab" data-sub="map" aria-selected="false"><?= $L('sub.map') ?> <span class="badge" id="n-map"></span></button>
       <button type="button" role="tab" data-sub="suggestions" aria-selected="false"><?= $L('sub.suggestions') ?> <span class="badge" id="n-sugg"></span></button>
+      <button type="button" role="tab" data-sub="assistant" aria-selected="false"><?= $L('sub.assistant') ?></button>
       <button type="button" role="tab" data-sub="rules" aria-selected="false"><?= $L('sub.rules') ?> <span class="dirty-dot" id="rules-dirty" hidden></span></button>
     </div>
 
@@ -2135,6 +2384,56 @@ footer.foot a { color: var(--muted); }
       <div class="tabletools"><input type="search" id="sugg-q" placeholder="<?= $L('tbl.search') ?>" aria-label="<?= $L('tbl.search') ?>"><span class="muted small" id="sugg-count"></span></div>
       <div id="sugg-list"></div>
       <div class="more" id="sugg-more" hidden><button type="button" class="btn small"><?= $L('tbl.more') ?></button></div>
+    </div>
+
+    <div data-subpanel="assistant" hidden>
+      <div class="card" id="asst">
+        <header><h2><?= $L('asst.title') ?></h2></header>
+        <p class="help"><?= $L('asst.help') ?></p>
+        <div class="asst-grid">
+          <label class="field"><?= $L('asst.query') ?><input type="search" id="as-q" placeholder="<?= $L('asst.query_ph') ?>" autocomplete="off" spellcheck="false"></label>
+          <label class="field"><?= $L('asst.mode') ?>
+            <select id="as-mode">
+              <option value="words"><?= $L('asst.mode_words') ?></option>
+              <option value="all"><?= $L('asst.mode_all') ?></option>
+              <option value="start"><?= $L('asst.mode_start') ?></option>
+              <option value="text"><?= $L('asst.mode_text') ?></option>
+            </select>
+          </label>
+          <label class="field"><?= $L('asst.target') ?><input type="text" id="as-target" list="payee-names" placeholder="<?= $L('asst.target_ph') ?>" autocomplete="off" spellcheck="false"></label>
+          <label class="field"><?= $L('asst.position') ?>
+            <select id="as-pos"><option value="end"><?= $L('asst.pos_end') ?></option><option value="top"><?= $L('asst.pos_top') ?></option></select>
+          </label>
+        </div>
+        <label class="check mt2"><input type="checkbox" id="as-name"> <span><?= $L('asst.name_only') ?><br><span class="help"><?= $L('asst.name_only_help') ?></span></span></label>
+        <div class="chips mt1" id="as-names"></div>
+        <div class="mt2">
+          <label class="field" for="as-rule"><?= $L('asst.rule') ?> <span class="badge" id="as-custom" hidden><?= $L('asst.rule_custom') ?></span></label>
+          <div class="row">
+            <input type="text" class="code grow" id="as-rule" spellcheck="false" autocomplete="off" aria-label="<?= $L('asst.rule') ?>">
+            <button type="button" class="btn small" id="as-rule-reset" hidden><?= $L('asst.rule_reset') ?></button>
+          </div>
+        </div>
+        <p class="muted small mt1" id="as-line-label" hidden><?= $L('asst.line_label') ?></p>
+        <pre class="rule-line" id="as-line" aria-live="polite"></pre>
+        <div id="as-error" class="notice bad mt1" hidden></div>
+        <div id="as-notes" class="notice warn mt1" hidden></div>
+        <div id="as-summary" class="mt1"></div>
+        <div class="row end mt4">
+          <button type="button" class="btn" id="as-insert" disabled><?= $L('asst.insert') ?></button>
+          <button type="button" class="btn primary" id="as-save" disabled><?= $L('asst.save') ?></button>
+        </div>
+      </div>
+      <div class="card" id="as-results" hidden>
+        <header><h3><?= $L('asst.matches') ?></h3><span class="badge" id="as-n"></span></header>
+        <div class="tablewrap"><table id="as-table"></table></div>
+        <p class="muted small" id="as-more" hidden></p>
+        <div id="as-similar-box" hidden>
+          <h3 class="mt3"><?= $L('asst.similar') ?></h3>
+          <p class="help"><?= $L('asst.similar_help') ?></p>
+          <div class="tablewrap"><table id="as-similar"></table></div>
+        </div>
+      </div>
     </div>
 
     <div data-subpanel="rules" hidden>
@@ -2296,6 +2595,7 @@ footer.foot a { color: var(--muted); }
   </form>
 </dialog>
 <div id="toasts" aria-live="polite"></div>
+<datalist id="payee-names"></datalist>
 
 <script type="application/json" id="boot"><?= json_encode($boot, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?></script>
 <script nonce="<?= $n ?>">
@@ -2422,6 +2722,7 @@ function loadVisible() {
     if (S.sub === 'map') loadMap();
     if (S.sub === 'suggestions') loadSugg();
     if (S.sub === 'rules') loadRules();
+    if (S.sub === 'assistant') { if (!S.rules.loaded) loadRules(); if (!S.cfg.loaded) loadConfig(); if (A.dataTime !== S.dataTime && ($('#as-q').value || A.custom)) { A.dataTime = S.dataTime; preview(); } }
   }
   if (S.tab === 'accounts') loadConfig();
 }
@@ -2639,7 +2940,7 @@ class Grid {
     this.more.querySelector('button').addEventListener('click', () => { this.limit += this.page * 2; this.render(); });
   }
   setRows(rows) {
-    this.rows = rows.map(r => Object.assign(r, {_s: this.cols.map(c => String(c.text ? c.text(r) : r[c.key] ?? '')).join('\u0001').toLowerCase()}));
+    this.rows = rows.map(r => Object.assign(r, {_s: this.cols.filter(c => !c.nosort).map(c => String(c.text ? c.text(r) : r[c.key] ?? '')).join('\u0001').toLowerCase()}));
     this.limit = this.page; this.render();
   }
   render() {
@@ -2653,6 +2954,7 @@ class Grid {
     }
     this.count.textContent = rows.length > this.limit ? t('tbl.count_part', {shown: n(this.limit), total: n(rows.length)}) : tn('tbl.count', rows.length, {total: n(rows.length)});
     const head = el('tr', {}, this.cols.map(col => {
+      if (col.nosort) return el('th', {scope: 'col'}, el('span', {class: 'sr-only'}, col.label));
       const th = el('th', {class: (col.num ? 'num ' : '') + (col.key === this.sort ? 'sorted ' + this.dir : ''), scope: 'col', tabindex: '0'}, col.label);
       const go = () => { if (this.sort === col.key) this.dir = this.dir === 'asc' ? 'desc' : 'asc'; else { this.sort = col.key; this.dir = col.num ? 'desc' : 'asc'; } this.render(); };
       th.addEventListener('click', go);
@@ -2681,6 +2983,7 @@ const srcLabel = s => String(s || '').split(',').filter(Boolean).map(x => {
 }).join(', ');
 const srcKind = s => (/rule/.test(s) ? 'rule' : /fallback/.test(s) ? 'fallback' : 'auto');
 const ex = v => el('div', {class: 'ex', title: v}, v);
+const actBtn = fn => el('button', {type: 'button', class: 'btn small', title: t('asst.open_title'), onclick: e => { e.stopPropagation(); fn(); }}, t('asst.open'));
 
 const payeeGrid = new Grid('payees', [
   {key: 'payee', label: t('col.payee'), cls: 'text'},
@@ -2692,6 +2995,7 @@ const payeeGrid = new Grid('payees', [
   {key: 'period', label: t('col.period'), cls: 'nowrap', text: r => (r.first === r.last ? r.first : `${r.first} – ${r.last}`), sortv: r => r.last},
   {key: 'categories', label: t('col.categories'), render: r => ex(r.categories)},
   {key: 'booking_texts', label: t('col.examples'), render: r => ex(r.booking_texts)},
+  {key: '_act', label: t('asst.open_title'), nosort: true, cls: 'act', render: r => actBtn(() => openAssistant(fromPayee(r.payee, r.booking_texts)))},
 ], {sort: 'transactions', filter: r => (!$('#payees-side').value || r.side === $('#payees-side').value) && (!$('#payees-src').value || srcKind(r.source) === $('#payees-src').value),
     onRow: r => { S.mapPayee = {name: r.payee, side: r.side}; showSub('map'); renderMapFilter(); mapGrid.render(); }});
 
@@ -2703,6 +3007,7 @@ const mapGrid = new Grid('map', [
   {key: 'source', label: t('col.source'), text: r => srcLabel(r.source)},
   {key: 'iban', label: 'IBAN', cls: 'nowrap'},
   {key: 'categories', label: t('col.categories'), render: r => ex(r.categories)},
+  {key: '_act', label: t('asst.open_title'), nosort: true, cls: 'act', render: r => actBtn(() => openAssistant(fromPayee(r.payee, r.booking_text)))},
 ], {sort: 'transactions', filter: r => (!S.mapPayee || (r.payee === S.mapPayee.name && r.side === S.mapPayee.side)) && (!$('#map-side').value || r.side === $('#map-side').value) && (!$('#map-src').value || srcKind(r.source) === $('#map-src').value)});
 
 for (const id of ['#payees-side', '#payees-src']) $(id).addEventListener('change', () => payeeGrid.render());
@@ -2721,6 +3026,8 @@ async function loadPayees() {
     S.payees = d.rows.map(r => ({...r, side: sideOf(r.firefly_type), transactions: Number(r.transactions) || 0}));
     payeeGrid.setRows(S.payees);
     $('#n-payees').textContent = n(S.payees.length);
+    const names = [...new Set(S.payees.map(r => r.payee))].sort((a, b) => a.localeCompare(b, locale));
+    $('#payee-names').replaceChildren(...names.map(x => el('option', {value: x})));
   } catch (e) { S.payees = null; toast(e.message, true); }
 }
 async function loadMap() {
@@ -2757,7 +3064,9 @@ function renderSugg() {
     const added = have.has(s.rule.trim());
     return el('div', {class: 'sugg' + (added ? ' added' : '')},
       el('div', {class: 'body'}, el('div', {class: 'names'}, t('sugg.item', {n: n(s.count), names: s.names})), el('code', {}, s.rule)),
-      el('button', {type: 'button', class: 'btn small', disabled: added, onclick: () => adoptRule(s.rule)}, added ? t('sugg.added_label') : t('sugg.adopt')));
+      el('div', {class: 'row'},
+        el('button', {type: 'button', class: 'btn small', onclick: () => openAssistant(fromRule(s.rule))}, t('sugg.adjust')),
+        el('button', {type: 'button', class: 'btn small', disabled: added, onclick: () => adoptRule(s.rule)}, added ? t('sugg.added_label') : t('sugg.adopt'))));
   }));
   $('#sugg-more').hidden = items.length <= suggLimit;
 }
@@ -2772,6 +3081,163 @@ function adoptRule(rule) {
   renderSugg();
   toast(t('sugg.added'));
 }
+
+// ------------------------------------------------------------------ rule assistant
+const A = {custom: false, targetTouched: false, seq: 0, last: null};
+const fallbackName = () => S.cfg.obj?.options?.payee_fallback || '(diverse)';
+/** start values from a counterparty name (or, for the fallback, from its first booking text) */
+function fromPayee(name, texts) {
+  if (name && name !== fallbackName() && !/^\(.*\)$/.test(name)) return {query: name, mode: 'all', target: name};
+  const words = String(texts || '').split(/[|;]/)[0].match(/[\p{L}][\p{L}.&'-]+/gu) || [];
+  return {query: words.slice(0, 3).join(' '), mode: 'words', target: ''};
+}
+/** start values from a rule line "pattern => target" */
+function fromRule(line) {
+  const i = line.lastIndexOf('=>');
+  const pattern = (i < 0 ? line : line.slice(0, i)).trim(), target = i < 0 ? '' : line.slice(i + 2).trim();
+  const query = pattern.replace(/^\/|\/[a-z]*$/g, '').replace(/\(\?<?[!=]\\p\{L\}\)|\\b/g, '').replace(/\\s\+/g, ' ').replace(/\\(.)/g, '$1').trim();
+  return {query, mode: 'words', target, rule: pattern};
+}
+function openAssistant(v) {
+  A.dataTime = S.dataTime;
+  showTab('payees');
+  showSub('assistant');
+  $('#as-q').value = v.query || '';
+  $('#as-mode').value = v.mode || 'words';
+  $('#as-name').checked = !!v.nameOnly;
+  $('#as-target').value = v.target || '';
+  A.targetTouched = !!v.target;
+  setCustom(!!v.rule);
+  if (v.rule) $('#as-rule').value = v.rule;
+  preview();
+  $('#as-q').focus();
+  $('#asst').scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+function setCustom(on) {
+  A.custom = on;
+  $('#as-custom').hidden = !on;
+  $('#as-rule-reset').hidden = !on;
+}
+const previewSoon = debounce(() => preview(), 250);
+async function preview() {
+  if (!S.st?.book || S.running) return;
+  loadPayees();
+  if (!S.rules.loaded) loadRules();
+  const q = $('#as-q').value;
+  if (!A.targetTouched) $('#as-target').value = q.trim();
+  const seq = ++A.seq;
+  const body = {query: q, mode: $('#as-mode').value, name_only: $('#as-name').checked, rule: A.custom ? $('#as-rule').value : '',
+    target: $('#as-target').value, position: $('#as-pos').value};
+  let d;
+  try { d = await api('rulepreview', {method: 'POST', json: body, raw: true}); } catch (e) { toast(e.message, true); return; }
+  if (seq !== A.seq) return;        // an older answer
+  A.last = d;
+  renderAssistant(d);
+}
+function ruleLineNo(pattern) {
+  const lines = $('#rules-text').value.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i].trim();
+    if (!l || l.startsWith('#')) continue;
+    const j = l.lastIndexOf('=>');
+    if (j > 0 && l.slice(0, j).trim() === pattern) return i + 1;
+  }
+  return 0;
+}
+function renderAssistant(d) {
+  if (!A.custom && document.activeElement !== $('#as-rule')) $('#as-rule').value = d.pattern || '';
+  $('#as-line').textContent = d.line || '';
+  $('#as-line-label').hidden = !d.line;
+  const err = $('#as-error');
+  err.hidden = !d.error;
+  err.textContent = d.error || '';
+  const notes = [...(d.notes || [])];
+  const dup = d.pattern && !d.error ? ruleLineNo(d.pattern) : 0;
+  if (dup) notes.push(t('asst.dup', {n: dup}));
+  if (S.rules.dirty) notes.push(t('asst.dirty'));
+  $('#as-notes').hidden = !notes.length;
+  $('#as-notes').replaceChildren(...notes.map(x => el('div', {}, x)));
+  const target = $('#as-target').value.trim();
+  const tot = d.totals || {};
+  const sum = [];
+  if (d.pattern && !d.error) {
+    if (!tot.texts) sum.push(el('p', {class: 'summary-line'}, t('asst.none')));
+    else {
+      sum.push(el('p', {class: 'summary-line'}, el('strong', {}, tn('asst.summary', tot.texts, {texts: n(tot.texts), bookings: n(tot.bookings)}))));
+      if (!target) sum.push(el('p', {class: 'summary-line muted'}, t('asst.need_target')));
+      else if (tot.changed) sum.push(el('p', {class: 'summary-line'}, t('asst.changed', {n: n(tot.changed), target})));
+      else if (!tot.kept) sum.push(el('p', {class: 'summary-line muted'}, t('asst.unchanged')));
+      if (tot.kept) sum.push(el('p', {class: 'summary-line'}, t('asst.kept', {n: n(tot.kept)})));
+      if ((d.affected || []).length) {
+        sum.push(el('div', {class: 'chips'}, el('span', {class: 'muted small'}, t('asst.from')),
+          d.affected.slice(0, 8).map(a => el('span', {class: 'chip', title: t('side.' + a.side)}, a.name, el('i', {}, t('kind.' + a.side)), el('b', {}, n(a.count))))));
+      }
+      const ex = (d.existing?.expense || 0) + (d.existing?.revenue || 0);
+      if (target && ex) sum.push(el('p', {class: 'summary-line muted'}, t('asst.existing', {name: target, n: n(ex)})));
+    }
+  }
+  $('#as-summary').replaceChildren(...sum);
+  const names = [...new Set([...(d.names || []), $('#as-q').value.trim()].filter(x => x && x !== target))].slice(0, 8);
+  $('#as-names').replaceChildren(...(names.length && d.pattern && !d.error ? [el('span', {class: 'muted small'}, t('asst.names')),
+    ...names.map(x => el('button', {type: 'button', class: 'chip', onclick: () => { $('#as-target').value = x; A.targetTouched = true; preview(); }}, x))] : []));
+  const ok = !!d.line && !d.error;
+  $('#as-insert').disabled = !ok || !!dup;
+  $('#as-save').disabled = !ok || !!dup || S.running;
+  // tables
+  const box = $('#as-results');
+  box.hidden = !(d.pattern && !d.error && ((d.matches || []).length || (d.similar || []).length));
+  $('#as-n').textContent = tot.texts ? n(tot.texts) : '';
+  const head = el('tr', {}, [t('col.text'), t('col.side'), t('col.count'), t('asst.col_now'), '', t('asst.col_new')].map((x, i) => el('th', {class: i === 2 ? 'num' : ''}, x)));
+  $('#as-table').replaceChildren(el('thead', {}, head), el('tbody', {}, (d.matches || []).map(m => el('tr', {class: m.changes ? '' : 'same'},
+    el('td', {class: 'text'}, m.text), el('td', {}, t('kind.' + m.side)), el('td', {class: 'num'}, n(m.count)),
+    el('td', {class: 'text'}, m.payee, ' ', el('span', {class: 'muted small'}, srcLabel(m.source))), el('td', {class: 'arrow'}, '→'),
+    el('td', {class: 'text new'}, m.kept ? [m.payee, ' ', el('span', {class: 'badge warn'}, t('asst.kept_badge'))] : (m.new || '?'))))));
+  $('#as-more').hidden = !d.more;
+  $('#as-more').textContent = d.more ? t('asst.more', {n: n(d.more)}) : '';
+  const sim = d.similar || [];
+  $('#as-similar-box').hidden = !sim.length;
+  $('#as-similar').replaceChildren(el('thead', {}, el('tr', {}, [t('col.text'), t('col.side'), t('col.count'), t('col.payee')].map((x, i) => el('th', {class: i === 2 ? 'num' : ''}, x)))),
+    el('tbody', {}, sim.map(m => el('tr', {}, el('td', {class: 'text'}, m.text), el('td', {}, t('kind.' + m.side)), el('td', {class: 'num'}, n(m.count)), el('td', {class: 'text'}, m.payee)))));
+}
+/** Inserts a rule line after all rules or before the first one (and its comment block). */
+function insertRule(line, position) {
+  const ta = $('#rules-text');
+  const lines = ta.value.replace(/\n+$/, '').split('\n');
+  if (lines.length === 1 && lines[0] === '') lines.length = 0;
+  const first = lines.findIndex(l => l.trim() !== '' && !l.trim().startsWith('#'));
+  if (position === 'top' && first >= 0) {
+    let at = first;
+    while (at > 0 && lines[at - 1].trim().startsWith('#') && first - at < 4) at--;
+    if (at > 0 && lines[at - 1].trim().startsWith('#')) at = first;   // a long comment block (the file header): directly before the rule
+    lines.splice(at, 0, line, ...(at < first ? [''] : []));
+  } else {
+    if (lines.length && lines[lines.length - 1].trim() !== '') lines.push('');
+    lines.push(line);
+  }
+  ta.value = lines.join('\n') + '\n';
+  rulesChanged();
+}
+async function adoptAssistant(save) {
+  const d = A.last;
+  if (!d || !d.line || d.error) return;
+  if (!S.rules.loaded) await loadRules();
+  insertRule(d.line.trim(), $('#as-pos').value);
+  if (save) {
+    await saveRules();
+  } else {
+    toast(t('asst.inserted'));
+  }
+  renderAssistant(d);
+}
+$('#as-q').addEventListener('input', previewSoon);
+$('#as-mode').addEventListener('change', () => { setCustom(false); preview(); });
+$('#as-name').addEventListener('change', () => { setCustom(false); preview(); });
+$('#as-pos').addEventListener('change', () => preview());
+$('#as-target').addEventListener('input', () => { A.targetTouched = true; previewSoon(); });
+$('#as-rule').addEventListener('input', () => { setCustom(true); previewSoon(); });
+$('#as-rule-reset').addEventListener('click', () => { setCustom(false); preview(); });
+$('#as-insert').addEventListener('click', () => adoptAssistant(false));
+$('#as-save').addEventListener('click', () => adoptAssistant(true));
 
 // ------------------------------------------------------------------ rules editor
 function markDirty() {

@@ -1205,6 +1205,45 @@ final class PayeeRules
      *
      * @return null|array{0:string, 1:int} [payee, rule line]
      */
+    /**
+     * Rule pattern for text typed by a user (rule assistant of web.php):
+     *   words  the words in this order, as whole words   "DB Hamburg" -> /\bDB\s+Hamburg\b/i
+     *   all    all words as whole words, in any order     /^(?=.*?\bDB\b)(?=.*?\bHamburg\b)/i
+     *   start  the booking text begins with the words     /^\s*DB\s+Hamburg\b/i
+     *   text   contains the text, also inside words       /DB\s+Hamburg/i
+     * $nameOnly limits it to the name after the last ";" of bank texts. An IBAN becomes "iban:...".
+     * With /u (added by load()) \b also knows umlauts.
+     */
+    public static function build(string $query, string $mode = 'words', bool $nameOnly = false): string
+    {
+        $query = Util::collapse($query);
+        if ('' === $query) {
+            return '';
+        }
+        $compact = strtoupper(str_replace(' ', '', $query));
+        if (1 === preg_match('/^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/', $compact) && Util::isValidIban($compact)) {
+            return 'iban:'.$compact;
+        }
+        $tokens = preg_split('/\s+/u', $query) ?: [];
+        $isWord = static fn (string $c): bool => 1 === preg_match('/^[\p{L}\p{N}_]$/u', $c);
+        $left   = static fn (string $t): string => $isWord(mb_substr($t, 0, 1)) ? '\b' : '';
+        $right  = static fn (string $t): string => $isWord(mb_substr($t, -1)) ? '\b' : '';
+        // escape only what is special outside character classes: "->" stays readable
+        $quoted = array_map(static fn (string $t): string => (string) preg_replace('~[\\\\.+*?\[\]^$(){}|/]~', '\\\\$0', $t), $tokens);
+        $phrase = implode('\s+', $quoted);
+        $first  = $tokens[0];
+        $last   = $tokens[count($tokens) - 1];
+        $body   = match ($mode) {
+            'all'   => ($nameOnly ? '(?:^|;)(?![^;]*;)' : '^').implode('', array_map(
+                static fn (string $t, string $q): string => '(?='.($nameOnly ? '[^;]*?' : '.*?').$left($t).$q.$right($t).')', $tokens, $quoted)),
+            'start' => ($nameOnly ? '(?:^|;)\s*' : '^\s*').$phrase.$right($last).($nameOnly ? '(?![^;]*;)' : ''),
+            'text'  => ($nameOnly ? '(?:^|;)(?![^;]*;)[^;]*?' : '').$phrase,
+            default => $left($first).$phrase.$right($last).($nameOnly ? '(?![^;]*;)' : ''),
+        };
+
+        return '/'.$body.'/i'.(1 === preg_match('/[^\x00-\x7f]/', $body) ? 'u' : '');
+    }
+
     public function match(string $description, array $ibans, string $category, array $memos): ?array
     {
         foreach ($this->rules as $rule) {

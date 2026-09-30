@@ -73,9 +73,12 @@ always derived from the whole book, so importing year by year gives the same nam
 ## Web interface
 
 `web.php` offers the same steps in the browser, in German or English: upload a book, check the
-counterparties, edit the payee rules (and adopt suggestions with one click) and the account
-mapping, dry run, import in the background with progress, export and compare, and delete test
-imports. It calls `firefly-gnucash.php` next to it, so both files belong together. Every browser
+counterparties, edit the payee rules and the account mapping, dry run, import in the background
+with progress, export and compare, and delete test imports. **Create rule** turns a typed text
+(e.g. `DB Hamburg`: words in this order, all words in any order, text begins with / contains it,
+optionally only in the recipient name after the last `;`) into a rule and shows before saving
+which booking texts it catches, which counterparty they have now and get then, and similar texts
+it misses; suggestions and every row of the counterparty tables can be opened there to adjust. It calls `firefly-gnucash.php` next to it, so both files belong together. Every browser
 only sees its own uploads.
 
 **Quick start** on the machine with the files (from elsewhere: `ssh -L 8090:127.0.0.1:8090 host`):
