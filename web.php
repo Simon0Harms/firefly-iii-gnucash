@@ -1066,13 +1066,13 @@ function apiRulePreview(Workspace $w): never
         $cats  = '' === (string) $r['categories'] ? [''] : explode(' | ', (string) $r['categories']);
         $ibans = array_values(array_filter(explode(' ', (string) $r['iban'])));
         $hit   = null;
+        $sd    = $side((string) $r['firefly_type']);
         foreach ($cats as $c) {
-            if (null !== ($hit = $rules->match($text, $ibans, $c, []))) {
+            if (null !== ($hit = $rules->match($text, $ibans, $c, [], $sd))) {
                 break;
             }
         }
         $count = (int) $r['transactions'];
-        $sd    = $side((string) $r['firefly_type']);
         if (null === $hit) {
             if ([] !== $tokens && \count($similar) < 60) {
                 $lt = $lower($text);

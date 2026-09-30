@@ -1123,7 +1123,7 @@ final class ImportConfig
 
 final class PayeeRules
 {
-    /** @var list<array{line:int, field:string, regex:?string, text:?string, payee:string}> */
+    /** @var list<array{line:int, side:string, field:string, regex:?string, text:?string, payee:string}> */
     public array $rules = [];
 
     public const TEMPLATE = <<<'TXT'
@@ -1138,6 +1138,8 @@ final class PayeeRules
         #   iban:DE12...        counterparty IBAN from the bank memo ("Konto <IBAN> Bank <BIC>")
         #   category:/regex/    the Firefly category (GnuCash account) of the split
         #   memo:/regex/        any split memo of the transaction
+        # Put "ausgabe:" (expense) or "einnahme:" (revenue) in front to limit a rule to
+        # withdrawals or deposits, e.g.  ausgabe:Platinum  or  einnahme:category:/^Erträge/
         # <counterparty> may use $1..$9 (regex groups), {category} and {description};
         # "-" means: use the fallback counterparty (option payee_fallback).
         # Transactions without a matching rule get an automatic counterparty (name after ";"
@@ -1150,6 +1152,7 @@ final class PayeeRules
         # /Ihr Einkauf bei ([^,;]+)/i                        => $1
         # /^Geldautomat/i                                    => Geldautomat
         # category:/^Lebensmittel/                           => {category}
+        # ausgabe:Platinum                                   => Platinum
 
         TXT;
 
@@ -1171,6 +1174,11 @@ final class PayeeRules
             $pattern = trim(substr($line, 0, $pos));
             $payee   = trim(substr($line, $pos + 2));
             $field   = 'desc';
+            $side    = '';
+            if (1 === preg_match('/^(ausgaben?|expense|einnahmen?|revenue):\s*(.*)$/is', $pattern, $m)) {
+                $side    = 1 === preg_match('/^(ausgaben?|expense)$/i', $m[1]) ? 'expense' : 'revenue';
+                $pattern = trim($m[2]);
+            }
             if (1 === preg_match('/^(desc|iban|category|memo):(.*)$/s', $pattern, $m)) {
                 $field   = $m[1];
                 $pattern = trim($m[2]);
@@ -1193,7 +1201,7 @@ final class PayeeRules
             } else {
                 $text = Util::lower($pattern);
             }
-            $r->rules[] = ['line' => $no + 1, 'field' => $field, 'regex' => $regex, 'text' => $text, 'payee' => $payee];
+            $r->rules[] = ['line' => $no + 1, 'side' => $side, 'field' => $field, 'regex' => $regex, 'text' => $text, 'payee' => $payee];
         }
 
         return $r;
@@ -1244,9 +1252,13 @@ final class PayeeRules
         return '/'.$body.'/i'.(1 === preg_match('/[^\x00-\x7f]/', $body) ? 'u' : '');
     }
 
-    public function match(string $description, array $ibans, string $category, array $memos): ?array
+    /** $side 'expense'|'revenue': rules limited with "ausgabe:"/"einnahme:" only match that side. */
+    public function match(string $description, array $ibans, string $category, array $memos, string $side = ''): ?array
     {
         foreach ($this->rules as $rule) {
+            if ('' !== $rule['side'] && $rule['side'] !== $side) {
+                continue;
+            }
             $subjects = match ($rule['field']) {
                 'desc'     => [$description],
                 'category' => [$category],
@@ -1530,7 +1542,7 @@ final class PayeeResolver
             $t          = $u['tx'];
             $u['ibans'] = self::ibansOf($t);
             $memos      = array_values(array_filter(array_map(static fn (GSplit $s) => $s->memo, $t->splits), static fn ($m) => '' !== $m));
-            $hit        = $this->rules->match($t->description, $u['ibans'], $u['category'], $memos);
+            $hit        = $this->rules->match($t->description, $u['ibans'], $u['category'], $memos, $u['side']);
             if (null !== $hit) {
                 $u['name']     = '-' === $hit[0] ? $this->fallbackName($fallback, $u, $t) : $hit[0];
                 $u['source']   = '-' === $hit[0] ? 'rule:fallback' : 'rule:'.$hit[1];

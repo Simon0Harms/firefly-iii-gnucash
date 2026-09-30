@@ -183,6 +183,8 @@ GnuCash has none. The counterparty is derived from the booking text:
    iban:DE89370400440532013000               => Stadtwerke
    category:/^Lebensmittel/                  => {category}
    memo:/Gutschein/i                         => -
+   ausgabe:Platinum                          => Platinum
+   einnahme:/Erstattung/i                    => Erstattungen
    ```
    Example – Amazon per country (tested with a real book):
    ```
@@ -200,7 +202,9 @@ GnuCash has none. The counterparty is derived from the booking text:
    resales are left out of the last rule.
 
    Patterns: `/regex/flags`, plain text (case-insensitive substring), `iban:`, `category:`,
-   `memo:`. The counterparty may use `$1…$9`, `{category}`, `{description}`; `-` means the
+   `memo:`. A leading `ausgabe:` (or `expense:`) / `einnahme:` (or `revenue:`) limits a rule to
+   withdrawals / deposits and can be combined with the others (`ausgabe:iban:DE…`,
+   `einnahme:category:/^Erträge/`). The counterparty may use `$1…$9`, `{category}`, `{description}`; `-` means the
    fallback counterparty. A text rule changes only the bookings whose text it matches – other
    texts with the same IBAN keep their own counterparty; `iban:` moves all bookings of an IBAN.
    A text pattern also matches the purpose of a transfer to someone else

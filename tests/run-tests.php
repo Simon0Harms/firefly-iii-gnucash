@@ -331,6 +331,14 @@ $only = FireflyGnuCash\PayeeRules::load($rf);
 check('rule limited to the name after the last ";"', 'Bäcker Erika Muster' === ($only->match('Bäcker Erika Muster ( für 21.03)', [], '', [])[0] ?? null)
     && 'Bäcker Erika Muster' === ($only->match('KARTENZAHLUNG 2026-03-01; BÄCKEREI ERIKA MUSTER', [], '', [])[0] ?? null)
     && null === $only->match('ÜBERWEISUNG 6 SESAM - BÄCKER ERIKA MUSTER; MARTHA BEISPIEL', [], '', []));
+// "ausgabe:" / "einnahme:" limit a rule to withdrawals / deposits, also combined with a field prefix
+file_put_contents($rf, "ausgabe:Platinum => Platinum\neinnahme:/Platinum/i => Platinum Erstattung\nEinnahmen: category:/^Erträge/ => {category}\n");
+$sided = FireflyGnuCash\PayeeRules::load($rf);
+check('side rule: expense', 'Platinum' === ($sided->match('3xPlatinum', [], '', [], 'expense')[0] ?? null));
+check('side rule: revenue', 'Platinum Erstattung' === ($sided->match('3xPlatinum', [], '', [], 'revenue')[0] ?? null));
+check('side rule: unknown side skips limited rules', null === $sided->match('3xPlatinum', [], '', []));
+check('side rule with category:', 'Erträge:Zinsen' === ($sided->match('Zinsen', [], 'Erträge:Zinsen', [], 'revenue')[0] ?? null)
+    && null === $sided->match('Zinsen', [], 'Erträge:Zinsen', [], 'expense'));
 // rule assistant: patterns built from typed text (PayeeRules::build) and what they match
 $bt = static function (string $query, string $mode = 'words', bool $nameOnly = false) use ($rf): FireflyGnuCash\PayeeRules {
     file_put_contents($rf, FireflyGnuCash\PayeeRules::build($query, $mode, $nameOnly)." => X\n");
