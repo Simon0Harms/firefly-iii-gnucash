@@ -153,7 +153,9 @@ check('assistant: invalid hand-written rule is reported', '' !== (string) ($r['e
 $r = $pv(['query' => 'Kiosk', 'target' => 'A => B']);
 check('assistant: "=>" in the name is refused', '' !== (string) ($r['error'] ?? ''));
 $r = $pv(['rule' => 'memo:/Brot/', 'target' => 'Bäcker']);
-check('assistant: memo rules get a note', [] !== ($r['notes'] ?? []) && null === $r['error']);
+check('assistant: memo rules are previewed from the split memos', null === $r['error'] && ($r['totals']['texts'] ?? 0) >= 1, json_encode($r['totals'] ?? null));
+$r = $pv(['rule' => 'memo:/Brot/ && konto:/^Nichtda$/', 'target' => 'Bäcker']);
+check('assistant: memo && konto preview', null === $r['error'] && 0 === ($r['totals']['texts'] ?? -1), json_encode($r['totals'] ?? null));
 $prows = api('GET', '?a=table&what=payees')['rows'] ?? [];
 $name  = (string) ($prows[0]['payee'] ?? '');
 $want  = array_sum(array_map(static fn ($x) => $x['payee'] === $name ? (int) $x['transactions'] : 0, $prows));

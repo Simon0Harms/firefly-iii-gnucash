@@ -1063,19 +1063,18 @@ function apiRulePreview(Workspace $w): never
         @unlink($tmp);
     }
     $fields = array_column($rules->rules[0]['conds'] ?? [], 'field');
-    if (\in_array('memo', $fields, true)) {
-        $out['notes'][] = t('asst.note_memo');
-    }
     if (\in_array('category', $fields, true)) {
         $out['notes'][] = t('asst.note_category');
     }
     if (\in_array('konto', $fields, true)) {
         $out['notes'][] = t('asst.note_konto');
     }
-    $accOf = [];
-    if (\in_array('konto', $fields, true) && $w->has('details')) {
+    $accOf  = [];
+    $memoOf = [];
+    if (([] !== array_intersect(['konto', 'memo'], $fields)) && $w->has('details')) {
         foreach ((array) json_decode((string) file_get_contents($w->file('details')), true) as $k => $d) {
-            $accOf[$k] = (array) ($d['acc'] ?? []);
+            $accOf[$k]  = (array) ($d['acc'] ?? []);
+            $memoOf[$k] = (array) ($d['memo'] ?? []);
         }
     }
     $opts     = bookOptions($w);
@@ -1094,7 +1093,7 @@ function apiRulePreview(Workspace $w): never
         $hit   = null;
         $sd    = $side((string) $r['firefly_type']);
         foreach ($cats as $c) {
-            if (null !== ($hit = $rules->match($text, $ibans, $c, [], $sd, $accOf[$text.'|'.$sd] ?? []))) {
+            if (null !== ($hit = $rules->match($text, $ibans, $c, $memoOf[$text.'|'.$sd] ?? [], $sd, $accOf[$text.'|'.$sd] ?? []))) {
                 break;
             }
         }
@@ -1424,6 +1423,7 @@ function textsDe(): array
         'det.none'            => 'Keine Details – bitte neu berechnen.',
         'det.loading'         => 'Lade Details …',
         'det.acc_rule'        => 'Regel für alle Buchungen dieses Kontos erstellen (konto:)',
+        'det.memo_rule'       => 'Regel für Buchungen mit dieser Bemerkung erstellen (memo:)',
         'tbl.side'            => 'Art',
         'tbl.all_sides'       => 'Ausgaben und Einnahmen',
         'tbl.source'          => 'Herkunft',
@@ -1500,7 +1500,6 @@ function textsDe(): array
         'asst.inserted'   => 'Regel eingefügt – im Reiter „Regeln“ speichern nicht vergessen.',
         'asst.err_newline'=> 'Regel und Gegenkonto dürfen keinen Zeilenumbruch enthalten.',
         'asst.err_arrow'  => 'Das Gegenkonto darf kein „=>“ enthalten.',
-        'asst.note_memo'  => 'memo:-Regeln kann die Vorschau nicht prüfen (die Memos stehen nicht in den Berichten).',
         'asst.note_konto'    => 'konto: prüft alle GnuCash-Konten der Buchung, z. B. das Bargeld- oder Kartenkonto, von dem bezahlt wurde.',
         'asst.note_category' => 'Bei category:-Regeln ist die Vorschau ungefähr: ein Buchungstext zählt, wenn eine seiner Kategorien passt.',
         'asst.open'       => 'Regel …',
@@ -1783,6 +1782,7 @@ function textsEn(): array
         'det.none'            => 'No details – please recalculate.',
         'det.loading'         => 'Loading details …',
         'det.acc_rule'        => 'Create a rule for all bookings of this account (konto:)',
+        'det.memo_rule'       => 'Create a rule for bookings with this memo (memo:)',
         'tbl.side'            => 'Kind',
         'tbl.all_sides'       => 'expenses and revenues',
         'tbl.source'          => 'Source',
@@ -1859,7 +1859,6 @@ function textsEn(): array
         'asst.inserted'   => 'Rule inserted – remember to save it in the “Rules” tab.',
         'asst.err_newline'=> 'Rule and counterparty must not contain a line break.',
         'asst.err_arrow'  => 'The counterparty must not contain “=>”.',
-        'asst.note_memo'  => 'The preview cannot check memo: rules (the memos are not in the reports).',
         'asst.note_konto'    => 'konto: checks all GnuCash accounts of the transaction, e.g. the cash or card account it was paid from.',
         'asst.note_category' => 'For category: rules the preview is approximate: a booking text counts when one of its categories matches.',
         'asst.open'       => 'Rule …',
@@ -3146,7 +3145,7 @@ function detailBox(text, side, det) {
     out.push(el('div', {class: 'tip-tx'}, el('div', {class: 'tip-meta'}, meta),
       x.notes ? el('div', {class: 'muted small'}, x.notes) : null,
       el('table', {}, el('tbody', {}, x.splits.map(sp => el('tr', {class: /^(Aufwendungen|Erträge|Expenses?|Income)\b/i.test(sp.account) ? 'hit' : ''},
-        el('td', {class: 'acc'}, el('button', {type: 'button', class: 'linkish', title: t('det.acc_rule'), onclick: () => { hideTip(); openAssistant(fromAccount(sp.account, side)); }}, sp.account)), el('td', {class: 'num'}, money(sp.amount, x.cur)), el('td', {class: 'memo'}, sp.memo)))))));
+        el('td', {class: 'acc'}, el('button', {type: 'button', class: 'linkish', title: t('det.acc_rule'), onclick: () => { hideTip(); openAssistant(fromAccount(sp.account, side)); }}, sp.account)), el('td', {class: 'num'}, money(sp.amount, x.cur)), el('td', {class: 'memo'}, sp.memo ? el('button', {type: 'button', class: 'linkish', title: t('det.memo_rule'), onclick: () => { hideTip(); openAssistant(fromMemo(sp.memo, side)); }}, sp.memo) : '')))))));
   }
   if (d.n > d.tx.length) out.push(el('div', {class: 'muted small'}, t('det.more', {n: n(d.n - d.tx.length)})));
   return out;
@@ -3155,6 +3154,12 @@ function detailBox(text, side, det) {
 function fromAccount(path, side) {
   const esc = path.replace(/[\\.+*?\[\]^$(){}|\/]/g, '\\$&');
   return {query: '', mode: 'words', target: path.split(':').pop(), rule: (side === 'revenue' ? 'einnahme:' : 'ausgabe:') + 'konto:/^' + esc + '$/'};
+}
+/** assistant start values for a "memo:" rule: the memo's words, in this order, as whole words */
+function fromMemo(memo, side) {
+  const words = (memo.match(/[\p{L}\p{N}]+/gu) || []).slice(0, 4);
+  const esc = words.join('\\W+');
+  return {query: '', mode: 'words', target: '', rule: (side === 'revenue' ? 'einnahme:' : 'ausgabe:') + 'memo:/\\b' + esc + '\\b/i'};
 }
 const tip = el('div', {id: 'tip', role: 'tooltip', hidden: true});
 document.body.append(tip);

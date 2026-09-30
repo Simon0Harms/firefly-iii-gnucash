@@ -2697,7 +2697,8 @@ final class Pipeline
             usort($tx, static fn ($a, $b) => $b['date'] <=> $a['date']);
             $json[$mk] = ['payee' => $d['payee'], 'n' => count($tx), 'tx' => array_slice($tx, 0, self::DETAIL_TX),
                 'acc' => array_values(array_unique(array_merge(...array_map(static fn ($x) => array_column($x['splits'], 'account'), $tx)))),
-                'find' => Util::truncate(implode(' | ', array_keys($d['find'])), 4000)];
+                'memo' => array_values(array_unique(array_filter(array_merge(...array_map(static fn ($x) => array_column($x['splits'], 'memo'), $tx)), static fn ($m) => '' !== $m))),
+                'find' => Util::truncate(implode(' | ', array_keys($d['find'])), 20000)];
         }
         $detailFile = $this->base.'.payee-details.json';
         file_put_contents($detailFile, json_encode($json, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE));
