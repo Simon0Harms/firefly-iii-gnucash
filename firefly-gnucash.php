@@ -1,4 +1,3 @@
-#!/usr/bin/env php
 <?php
 /*
  * firefly-gnucash.php - import a GnuCash book into Firefly III and export Firefly III

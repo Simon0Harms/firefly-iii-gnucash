@@ -90,9 +90,12 @@ php -d upload_max_filesize=200M -d post_max_size=200M -S 127.0.0.1:8090 web.php
 ```apache
 # /etc/apache2/conf-available/firefly-gnucash.conf, then: a2enconf firefly-gnucash && systemctl reload apache2
 Alias /gnucash /opt/firefly-gnucash/web.php
+# protect it with Basic Auth here or at the reverse proxy (Apache allows no comments after a directive)
 <Location /gnucash>
-    Require all granted     # protect it with Basic Auth here or at the reverse proxy
+    Require all granted
 </Location>
+php_admin_value upload_max_filesize 200M
+php_admin_value post_max_size 200M
 ```
 
 **nginx + PHP-FPM:**
