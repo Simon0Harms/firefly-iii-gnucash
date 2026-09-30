@@ -1,7 +1,7 @@
 <?php
 /*
  * Regression tests for firefly-gnucash.php (offline part: reading, mapping, decomposition,
- * payees, export XML). Run: php .multisource/gnucash/tests/run-tests.php
+ * payees, export XML). Run: php tests/run-tests.php
  * License: GPL-3.0-or-later
  */
 
@@ -191,6 +191,14 @@ $T = [
     /* 29 */ ['2026-04-09', 'ÜBERWEISUNG 6 SESAM - BÄCKER ERIKA MUSTER; MARTHA BEISPIEL', 'EUR', [['food', '300/100', '300/100'], ['bank', '-300/100', '-300/100', 'Konto DE44500105175407324931 Bank INGDDEFFXXX']]],
 ];
 
+// "php run-tests.php --write-book=FILE" only writes the synthetic book (used by web-tests.php)
+foreach (array_slice($argv, 1) as $arg) {
+    if (str_starts_with($arg, '--write-book=')) {
+        file_put_contents(substr($arg, 13), gzencode(book($A, $T)));
+        exit(0);
+    }
+}
+
 $p = run($A, $T);
 check('self-check', [] === $p->verifier->errors, implode("\n", $p->verifier->errors));
 $index = array_flip(array_map(static fn ($i) => md5('test:tx:'.$i), range(0, count($T) - 1)));
@@ -252,6 +260,13 @@ foreach ($p4->plans as $pl) {
 }
 check('date range: same counterparty names as for the whole book', ['Bäcker Erika Muster', 'Bäcker Erika Muster'] === $slice, json_encode($slice, JSON_UNESCAPED_UNICODE));
 check('date range: only transactions in the range are planned', 7 === count($p4->plans), (string) count($p4->plans));
+$p5  = run($A, $T);                                   // the same book without date range
+$csv = static function (Pipeline $p): string {
+    $p->writePayeeReports();
+
+    return (string) file_get_contents($p->base.'.payees.csv').(string) file_get_contents($p->base.'.payee-map.csv');
+};
+check('date range: payee reports cover the whole book', $csv($p5) === $csv($p4));
 
 // ---- no multisource (upstream Firefly): separate groups per source account
 $p2 = run($A, $T, ['multisource' => false]);

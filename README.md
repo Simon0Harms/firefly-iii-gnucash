@@ -10,6 +10,8 @@
 | `compare` | Compares the account balances of two GnuCash books, e.g. the original and an export after the import. |
 | `purge`   | Deletes what an import created – for test runs. |
 
+`web.php` does the same in the browser (see [Web interface](#web-interface)).
+
 It is a standalone PHP script that talks to the **Firefly III REST API** with a Personal Access
 Token. It does not change Firefly III itself and works with every Firefly version that has the
 v1 API. Unofficial, not supported by the Firefly III project. Created with AI (Claude by
@@ -32,12 +34,16 @@ Anthropic). License: GPL-3.0-or-later.
 
 ## Installation in the Firefly LXC
 
-Everything below `/opt/firefly` survives updates (see `firefly-update.sh`), so keep the tool,
-the book, the mapping files and the token there:
+Keep the tool, the book, the mapping files and the token together in a directory that Firefly
+updates leave alone – **not** in the Firefly code directory, which an update replaces. With the
+update script `firefly-update` of [firefly-iii-multisource](https://github.com/Simon0Harms/firefly-iii-multisource)
+use `/opt/firefly/shared/gnucash`: its first run moves everything else directly below
+`/opt/firefly` into a release directory that later updates delete. Otherwise e.g. `/opt/firefly-gnucash`:
 
 ```bash
-mkdir -p /opt/firefly/gnucash && cd /opt/firefly/gnucash
+mkdir -p /opt/firefly-gnucash && cd /opt/firefly-gnucash
 curl -fsSLO https://raw.githubusercontent.com/Simon0Harms/firefly-iii-gnucash/main/firefly-gnucash.php
+curl -fsSLO https://raw.githubusercontent.com/Simon0Harms/firefly-iii-gnucash/main/web.php   # optional: web interface
 printf '%s' 'PASTE-THE-TOKEN-HERE' > token && chmod 600 token
 export FIREFLY_URL=http://localhost        # or https://host/firefly behind a reverse proxy
 ```
@@ -63,6 +69,69 @@ For a first test, import one year only (`--from=2025-01-01 --to=2025-12-31`, bal
 incomplete) or a few transactions (`--limit=200`), look at the result in Firefly and remove it
 again with `php firefly-gnucash.php purge --accounts --token-file=token`. Counterparty names are
 always derived from the whole book, so importing year by year gives the same names as one run.
+
+## Web interface
+
+`web.php` offers the same steps in the browser, in German or English: upload a book, check the
+counterparties, edit the payee rules (and adopt suggestions with one click) and the account
+mapping, dry run, import in the background with progress, export and compare, and delete test
+imports. It calls `firefly-gnucash.php` next to it, so both files belong together. Every browser
+only sees its own uploads.
+
+**Quick start** on the machine with the files (from elsewhere: `ssh -L 8090:127.0.0.1:8090 host`):
+
+```bash
+php -d upload_max_filesize=200M -d post_max_size=200M -S 127.0.0.1:8090 web.php
+# open http://127.0.0.1:8090 - the built-in server is fine for one user; for several use Apache/nginx
+```
+
+**Apache** (e.g. in the Firefly LXC), only `web.php` becomes reachable:
+
+```apache
+# /etc/apache2/conf-available/firefly-gnucash.conf, then: a2enconf firefly-gnucash && systemctl reload apache2
+Alias /gnucash /opt/firefly-gnucash/web.php
+<Location /gnucash>
+    Require all granted     # protect it with Basic Auth here or at the reverse proxy
+</Location>
+```
+
+**nginx + PHP-FPM:**
+
+```nginx
+location = /gnucash {
+    include fastcgi_params;
+    fastcgi_param SCRIPT_FILENAME /opt/firefly-gnucash/web.php;
+    fastcgi_pass unix:/run/php/php8.4-fpm.sock;
+    client_max_body_size 200m;
+}
+```
+
+Raise `upload_max_filesize` and `post_max_size` in the php.ini of the web server (default 2 MB)
+and, behind a reverse proxy such as NPMplus, its upload limit too. Long imports need no long
+timeouts: they run as a background process (`php firefly-gnucash.php import …`) and the page only
+polls their progress; you can close the page and come back. The web server PHP needs `proc_open`
+and the PHP command line binary (installed with Firefly; set `php_cli` if it is not found).
+
+**Settings:** copy `web.config.example.php` to `web.config.php`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `firefly_url` | empty | fixed Firefly URL; the field becomes read-only (recommended with several users) |
+| `data_dir` | system temp dir | uploads, reports and logs; must **not** be inside the web root |
+| `retention_hours` | `24` | workspaces not used for this long are deleted |
+| `max_upload_mb` | `200` | upload limit (the PHP limits apply as well) |
+| `php_cli` | auto | PHP command line binary for the background jobs |
+| `cacert` | empty | CA bundle for a Firefly with a self-signed certificate |
+| `timezone` | PHP setting | for old GnuCash dates without neutral time |
+
+**Security.** `web.php` has no login of its own: bind it to 127.0.0.1 or protect it at the web
+server or reverse proxy (Basic Auth). The Personal Access Token is typed in the browser, sent only
+with the action that needs it (use HTTPS), and handed to the background process in its
+environment – it is not written to disk or into logs. "Remember in this browser tab" keeps it in
+the tab's `sessionStorage`. Each browser gets a random workspace (`data_dir/<id>`, mode 0700)
+bound to a signed cookie; "Delete workspace" removes it at once. Requests are protected against
+CSRF, the page has a strict Content Security Policy. Without `firefly_url` the server connects to
+the Firefly URL a user enters.
 
 ## How GnuCash is mapped to Firefly III
 
@@ -266,11 +335,13 @@ Command line options: `--config=FILE`, `--rules=FILE`, `--from/--to=YYYY-MM-DD`,
 
 ```bash
 php tests/run-tests.php
+php tests/web-tests.php     # web.php over HTTP (built-in server, no Firefly needed)
 ```
 
 Synthetic GnuCash books covering split receipts, several source accounts, pay slips, refunds,
 re-bookings, credit cards, loans, DEM with trading accounts, rounding, opening balances, payee
-rules and an export read-back. The workflow `.github/workflows/gnucash-tool.yml` runs them.
+rules and an export read-back; `web-tests.php` drives `web.php` through its HTTP API. The
+workflow `.github/workflows/tests.yml` runs both.
 
 ## Troubleshooting
 

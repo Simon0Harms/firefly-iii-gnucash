@@ -2393,8 +2393,11 @@ final class Pipeline
     public Decomposer $dec;
     public Verifier $verifier;
 
-    /** @var list<TxPlan> */
+    /** @var list<TxPlan> transactions to import (within --from/--to) */
     public array $plans = [];
+
+    /** @var list<TxPlan> every transaction of the book: the payee reports always cover the whole book */
+    public array $allPlans = [];
 
     public string $configFile;
     public string $rulesFile;
@@ -2420,7 +2423,8 @@ final class Pipeline
         foreach ($this->book->transactions as $t) {
             // every transaction registers its counterparties, also outside --from/--to: the
             // names (spelling, prefix merge, min count) must not change when importing in slices
-            $plan = $this->dec->decompose($t);
+            $plan              = $this->dec->decompose($t);
+            $this->allPlans[] = $plan;
             if ((null !== $from && $t->date < $from) || (null !== $to && $t->date > $to)) {
                 continue;
             }
@@ -2491,7 +2495,7 @@ final class Pipeline
     public function writePayeeReports(): array
     {
         $amounts = [];
-        foreach ($this->plans as $p) {
+        foreach ($this->allPlans as $p) {
             foreach ($p->groups as $g) {
                 foreach ($g->journals as $j) {
                     foreach (['src', 'dst'] as $side) {
@@ -2643,6 +2647,46 @@ final class Pipeline
         file_put_contents($file, $out);
 
         return ['file' => $file, 'count' => count($rows)];
+    }
+
+    /**
+     * The summary of printSummary() as data (plan --summary-json, used by web.php).
+     *
+     * @param array{counts: array<string, int>, top: list<array<string, mixed>>} $payeeReport
+     * @param array{file: string, count: int}                                    $sugg
+     *
+     * @return array<string, mixed>
+     */
+    public function summaryData(array $payeeReport, array $sugg): array
+    {
+        $b    = $this->book;
+        $st   = $this->stats();
+        $used = ['asset' => 0, 'liability' => 0, 'category' => 0];
+        foreach ($this->config->accounts as $m) {
+            if (isset($used[$m['as']]) && ($m['splits'] ?? 0) > 0) {
+                ++$used[$m['as']];
+            }
+        }
+        $warnings = [];
+        foreach ($st['warnings'] as $examples) {
+            $warnings[] = ['count' => count($examples), 'example' => $examples[0]];
+        }
+
+        return [
+            'version'          => VERSION,
+            'book'             => ['accounts' => count($b->accounts), 'transactions' => count($b->transactions), 'currency' => $b->defaultCurrency,
+                'first' => $b->transactions[0]->date ?? null, 'last' => [] === $b->transactions ? null : end($b->transactions)->date],
+            'mapping'          => $used,
+            'importable'       => ['transactions' => $st['tx'], 'journals' => $st['journals'], 'multisource' => $st['multisource'], 'clearing' => $st['clearing']] + $st['groups'],
+            'opening_balances' => count($this->dec->openingBalance),
+            'skipped'          => $st['skipped'],
+            'counterparties'   => ['expense' => $payeeReport['counts']['expense'] ?? 0, 'revenue' => $payeeReport['counts']['revenue'] ?? 0, 'rules' => count($this->rules->rules),
+                'suggestions' => $sugg['count'], 'top' => array_values(array_map(static fn ($e) => ['name' => $e['name'], 'side' => $e['side'], 'transactions' => count($e['tx'])], $payeeReport['top']))],
+            'warnings'         => $warnings,
+            'not_imported'     => $b->otherObjects,
+            'selfcheck'        => ['ok' => [] === $this->verifier->errors, 'checked' => $this->verifier->checked, 'errors' => array_slice($this->verifier->errors, 0, 20)],
+            'config_messages'  => $this->config->messages,
+        ];
     }
 
     public function printSummary(array $payeeReport): void
@@ -4639,7 +4683,7 @@ final class Purger
 {
     public static function run(Args $args): int
     {
-        $args->check(['tag', 'accounts', 'yes', 'url', 'token', 'token-file', 'cacert', 'timeout', 'verbose', 'quiet']);
+        $args->check(['tag', 'accounts', 'yes', 'dry-run', 'url', 'token', 'token-file', 'cacert', 'timeout', 'verbose', 'quiet']);
         $api = FireflyClient::fromArgs($args);
         $tag = $args->get('tag') ?? 'GnuCash-Import';
         Out::step(sprintf('Looking for transactions with tag "%s"%s', $tag, $args->has('accounts') ? ' and for accounts/categories created by the import' : ''));
@@ -4669,6 +4713,11 @@ final class Purger
         Out::info(sprintf('  %d transactions, %d accounts (their transactions are deleted with them), %d categories', $tagged, count($accounts), count($cats)));
         if (0 === $tagged && [] === $accounts && [] === $cats) {
             Out::info('Nothing to delete.');
+
+            return 0;
+        }
+        if ($args->has('dry-run')) {
+            Out::info('Dry run - nothing was deleted.');
 
             return 0;
         }
@@ -4744,11 +4793,11 @@ final class App
         firefly-gnucash VERSION - GnuCash <-> Firefly III via the Firefly III API
 
         Usage:
-          php firefly-gnucash.php plan    BOOK.gnucash [--config=FILE] [--rules=FILE]
+          php firefly-gnucash.php plan    BOOK.gnucash [--config=FILE] [--rules=FILE] [--summary-json=FILE]
           php firefly-gnucash.php import  BOOK.gnucash [--dry-run] [--yes] [--from=DATE] [--to=DATE] [--limit=N] [--update-payees]
           php firefly-gnucash.php export  OUT.gnucash  [--from=DATE] [--to=DATE] [--uncompressed]
           php firefly-gnucash.php compare A.gnucash B.gnucash [--by-year]
-          php firefly-gnucash.php purge   [--tag=TAG] [--accounts] [--yes]
+          php firefly-gnucash.php purge   [--tag=TAG] [--accounts] [--dry-run] [--yes]
 
         plan     Reads the GnuCash book (XML/compressed XML/SQLite) and writes next to it:
                    BOOK.import.json      account mapping + options (edit, then run plan again)
@@ -4881,13 +4930,16 @@ final class App
 
     private static function plan(Args $args, \DateTimeZone $tz): int
     {
-        $args->check(['config', 'rules', 'from', 'to', 'timezone', 'verbose', 'quiet']);
+        $args->check(['config', 'rules', 'from', 'to', 'timezone', 'verbose', 'quiet', 'summary-json']);
         $p = new Pipeline(self::bookArg($args), $args, $tz);
         $p->run(self::date($args, 'from'), self::date($args, 'to'));
         $p->config->save();
         $newRules = $p->writeRulesTemplate();
         $report   = $p->writePayeeReports();
         $sugg     = $p->writeSuggestions();
+        if (null !== ($json = $args->get('summary-json')) && '' !== $json) {
+            file_put_contents($json, json_encode($p->summaryData($report, $sugg), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE)."\n");
+        }
         $p->printSummary($report);
         foreach ($p->config->messages as $m) {
             Out::info('Config:           '.$m);
@@ -4905,5 +4957,9 @@ final class App
 }
 
 if (!\defined('FIREFLY_GNUCASH_LIBRARY')) {
+    if ('cli' !== PHP_SAPI && 'phpdbg' !== PHP_SAPI) {    // served by a web server by mistake
+        http_response_code(403);
+        exit("firefly-gnucash.php is a command line tool - use web.php for the web interface.\n");
+    }
     exit(App::main($argv));
 }

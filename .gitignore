@@ -9,3 +9,6 @@
 *.payee-suggestions.txt
 *.import-log.jsonl
 token*
+
+# local settings of the web interface
+web.config.php

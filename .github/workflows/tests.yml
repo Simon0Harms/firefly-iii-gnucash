@@ -1,7 +1,7 @@
 name: tests
 
-# Runs the offline regression tests of firefly-gnucash.php
-# (GnuCash reader, mapping, transaction decomposition, payee rules, export XML).
+# Runs the offline regression tests of firefly-gnucash.php (GnuCash reader, mapping,
+# transaction decomposition, payee rules, export XML) and the HTTP tests of web.php.
 
 on:
   push:
@@ -25,8 +25,13 @@ jobs:
           extensions: bcmath, curl, dom, xmlreader, xmlwriter, zlib, mbstring, pdo_sqlite
           coverage: none
       - name: Lint
-        run: php -l firefly-gnucash.php
+        run: |
+          php -l firefly-gnucash.php
+          php -l web.php
+          php -l web.config.example.php
       - name: Regression tests
         run: php tests/run-tests.php
+      - name: Web interface tests
+        run: php tests/web-tests.php
       - name: Help works
         run: php firefly-gnucash.php help
