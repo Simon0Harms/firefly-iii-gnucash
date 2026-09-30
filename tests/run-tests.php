@@ -339,6 +339,12 @@ check('side rule: revenue', 'Platinum Erstattung' === ($sided->match('3xPlatinum
 check('side rule: unknown side skips limited rules', null === $sided->match('3xPlatinum', [], '', []));
 check('side rule with category:', 'Erträge:Zinsen' === ($sided->match('Zinsen', [], 'Erträge:Zinsen', [], 'revenue')[0] ?? null)
     && null === $sided->match('Zinsen', [], 'Erträge:Zinsen', [], 'expense'));
+// "konto:" matches any GnuCash account of the transaction (e.g. the cash account it was paid from)
+file_put_contents($rf, "ausgabe:konto:/:Casino$/ => Casino\naccount:/^Aktiva:Bar/ => Bar\n");
+$kr = FireflyGnuCash\PayeeRules::load($rf);
+check('konto rule', 'Casino' === ($kr->match('Currywurst', [], 'Lebensmittel', [], 'expense', ['Aufwendungen:Lebensmittel', 'Aktiva:Barvermögen:Casino'])[0] ?? null)
+    && 'Bar' === ($kr->match('Currywurst', [], 'Lebensmittel', [], 'revenue', ['Aktiva:Barvermögen:Casino'])[0] ?? null)
+    && null === $kr->match('Currywurst', [], 'Lebensmittel', [], 'expense', ['Aktiva:Girokonto']));
 // rule assistant: patterns built from typed text (PayeeRules::build) and what they match
 $bt = static function (string $query, string $mode = 'words', bool $nameOnly = false) use ($rf): FireflyGnuCash\PayeeRules {
     file_put_contents($rf, FireflyGnuCash\PayeeRules::build($query, $mode, $nameOnly)." => X\n");

@@ -1138,6 +1138,8 @@ final class PayeeRules
         #   iban:DE12...        counterparty IBAN from the bank memo ("Konto <IBAN> Bank <BIC>")
         #   category:/regex/    the Firefly category (GnuCash account) of the split
         #   memo:/regex/        any split memo of the transaction
+        #   konto:/regex/       any GnuCash account of the transaction (full path), e.g. the
+        #                       cash or card account it was paid from
         # Put "ausgabe:" (expense) or "einnahme:" (revenue) in front to limit a rule to
         # withdrawals or deposits, e.g.  ausgabe:Platinum  or  einnahme:category:/^Erträge/
         # <counterparty> may use $1..$9 (regex groups), {category} and {description};
@@ -1153,6 +1155,7 @@ final class PayeeRules
         # /^Geldautomat/i                                    => Geldautomat
         # category:/^Lebensmittel/                           => {category}
         # ausgabe:Platinum                                   => Platinum
+        # konto:/:Kantine$/                                  => Kantine
 
         TXT;
 
@@ -1179,8 +1182,8 @@ final class PayeeRules
                 $side    = 1 === preg_match('/^(ausgaben?|expense)$/i', $m[1]) ? 'expense' : 'revenue';
                 $pattern = trim($m[2]);
             }
-            if (1 === preg_match('/^(desc|iban|category|memo):(.*)$/s', $pattern, $m)) {
-                $field   = $m[1];
+            if (1 === preg_match('/^(desc|iban|category|memo|konto|account):(.*)$/s', $pattern, $m)) {
+                $field   = 'account' === $m[1] ? 'konto' : $m[1];
                 $pattern = trim($m[2]);
             }
             if ('' === $pattern || '' === $payee) {
@@ -1252,8 +1255,13 @@ final class PayeeRules
         return '/'.$body.'/i'.(1 === preg_match('/[^\x00-\x7f]/', $body) ? 'u' : '');
     }
 
-    /** $side 'expense'|'revenue': rules limited with "ausgabe:"/"einnahme:" only match that side. */
-    public function match(string $description, array $ibans, string $category, array $memos, string $side = ''): ?array
+    /**
+     * $side 'expense'|'revenue': rules limited with "ausgabe:"/"einnahme:" only match that side.
+     * $accounts: full GnuCash paths of all accounts of the transaction ("konto:" rules).
+     *
+     * @param list<string> $accounts
+     */
+    public function match(string $description, array $ibans, string $category, array $memos, string $side = '', array $accounts = []): ?array
     {
         foreach ($this->rules as $rule) {
             if ('' !== $rule['side'] && $rule['side'] !== $side) {
@@ -1263,6 +1271,7 @@ final class PayeeRules
                 'desc'     => [$description],
                 'category' => [$category],
                 'memo'     => $memos,
+                'konto'    => $accounts,
                 'iban'     => $ibans,
             };
             foreach ($subjects as $subject) {
@@ -1370,12 +1379,16 @@ final class PayeeResolver
         return array_keys($found);
     }
 
-    /** Register that transaction $t needs a counterparty on $side ('expense'|'revenue') for $category. */
-    public function add(GTransaction $t, string $side, string $category): string
+    /**
+     * Register that transaction $t needs a counterparty on $side ('expense'|'revenue') for $category.
+     *
+     * @param list<string> $accounts full paths of all accounts of $t (for "konto:" rules)
+     */
+    public function add(GTransaction $t, string $side, string $category, array $accounts = []): string
     {
         $key = $t->guid.'|'.$side.'|'.$category;
         if (!isset($this->usages[$key])) {
-            $this->usages[$key] = ['tx' => $t, 'side' => $side, 'category' => $category];
+            $this->usages[$key] = ['tx' => $t, 'side' => $side, 'category' => $category, 'accounts' => $accounts];
         }
 
         return $key;
@@ -1542,7 +1555,7 @@ final class PayeeResolver
             $t          = $u['tx'];
             $u['ibans'] = self::ibansOf($t);
             $memos      = array_values(array_filter(array_map(static fn (GSplit $s) => $s->memo, $t->splits), static fn ($m) => '' !== $m));
-            $hit        = $this->rules->match($t->description, $u['ibans'], $u['category'], $memos, $u['side']);
+            $hit        = $this->rules->match($t->description, $u['ibans'], $u['category'], $memos, $u['side'], $u['accounts'] ?? []);
             if (null !== $hit) {
                 $u['name']     = '-' === $hit[0] ? $this->fallbackName($fallback, $u, $t) : $hit[0];
                 $u['source']   = '-' === $hit[0] ? 'rule:fallback' : 'rule:'.$hit[1];
@@ -1849,6 +1862,12 @@ final class Decomposer
         if ((bool) $config->opt('opening_balances')) {
             $this->detectOpeningBalances();
         }
+    }
+
+    /** @return list<string> full paths of all accounts of $t */
+    private function accountPaths(GTransaction $t): array
+    {
+        return array_values(array_unique(array_map(fn (GSplit $sp): string => $this->book->account($sp->account)->path, $t->splits)));
     }
 
     public static function decimals(string $currency): int
@@ -2223,7 +2242,7 @@ final class Decomposer
                 $j->type     = 'withdrawal';
                 $j->src      = 'C' === $from ? ['clearing', null] : ['bs', $sp[$from]['s']->account];
                 $j->category = (string) $sp[$to]['map']['name'];
-                $j->dst      = ['payee', $this->payees->add($t, 'expense', $j->category)];
+                $j->dst      = ['payee', $this->payees->add($t, 'expense', $j->category, $this->accountPaths($t))];
                 [$j->amount, $j->currency, $j->decimals] = [$qf, $fc, $fd];
                 if ($tc !== $fc) {
                     [$j->foreignAmount, $j->foreignCurrency, $j->foreignDecimals] = [$qt, $tc, $td];
@@ -2233,7 +2252,7 @@ final class Decomposer
             } else {
                 $j->type     = 'deposit';
                 $j->category = (string) $sp[$from]['map']['name'];
-                $j->src      = ['payee', $this->payees->add($t, 'revenue', $j->category)];
+                $j->src      = ['payee', $this->payees->add($t, 'revenue', $j->category, $this->accountPaths($t))];
                 $j->dst      = 'C' === $to ? ['clearing', null] : ['bs', $sp[$to]['s']->account];
                 [$j->amount, $j->currency, $j->decimals] = [$qt, $tc, $td];
                 if ($fc !== $tc) {
@@ -2541,6 +2560,25 @@ final class Pipeline
         return true;
     }
 
+    /** Transactions per booking text in <book>.payee-details.json. */
+    private const DETAIL_TX = 12;
+
+    /** @return array{date:string, desc:string, num:string, notes:string, cur:string, splits:list<array{account:string, amount:string, memo:string}>} */
+    private function detailOf(GTransaction $t): array
+    {
+        $dec    = Decomposer::decimals($t->currency);
+        $splits = [];
+        foreach ($t->splits as $sp) {
+            $splits[] = [
+                'account' => $this->book->account($sp->account)->path,
+                'amount'  => Util::minorToDec(Util::fracToMinor($sp->value, Util::fractionForDecimals($dec)), $dec),
+                'memo'    => Util::collapse($sp->memo),
+            ];
+        }
+
+        return ['date' => $t->date, 'desc' => Util::collapse($t->description), 'num' => $t->num, 'notes' => Util::collapse($t->notes), 'cur' => $t->currency, 'splits' => $splits];
+    }
+
     /** Payee summary (one row per counterparty) and payee map (one row per booking text). */
     public function writePayeeReports(): array
     {
@@ -2560,6 +2598,7 @@ final class Pipeline
         }
         $summary = [];
         $map     = [];
+        $details = [];
         foreach ($this->payees->usages() as $key => $u) {
             $r    = $this->payees->get($key);
             /** @var GTransaction $t */
@@ -2585,6 +2624,21 @@ final class Pipeline
             $map[$mk] ??= ['desc' => $d, 'side' => $u['side'], 'tx' => [], 'payee' => $r['name'], 'source' => $r['source'], 'iban' => implode(' ', $u['ibans'] ?? []), 'cats' => []];
             $map[$mk]['tx'][$t->guid]           = true;
             $map[$mk]['cats'][$u['category']] = true;
+            $details[$mk] ??= ['payee' => $r['name'], 'tx' => [], 'find' => []];
+            if (!isset($details[$mk]['tx'][$t->guid])) {
+                $details[$mk]['tx'][$t->guid] = $this->detailOf($t);
+                foreach ($details[$mk]['tx'][$t->guid]['splits'] as $sp) {
+                    $details[$mk]['find'][$sp['account']] = true;
+                    if ('' !== $sp['memo']) {
+                        $details[$mk]['find'][$sp['memo']] = true;
+                    }
+                }
+                foreach ([$t->num, $t->notes] as $x) {
+                    if ('' !== trim($x)) {
+                        $details[$mk]['find'][Util::collapse($x)] = true;
+                    }
+                }
+            }
         }
         uasort($summary, static fn ($a, $b) => [count($b['tx']), $a['name']] <=> [count($a['tx']), $b['name']]);
         $sideName = ['expense' => 'Ausgabenkonto', 'revenue' => 'Einnahmenkonto'];
@@ -2611,12 +2665,24 @@ final class Pipeline
         }
         $mapFile = $this->base.'.payee-map.csv';
         file_put_contents($mapFile, $out);
+        // details per booking text for web.php (tooltip and search): newest transactions with
+        // all their splits, and the memos/accounts/numbers/notes of all of them as search text
+        $json = [];
+        foreach ($details as $mk => $d) {
+            $tx = array_values($d['tx']);
+            usort($tx, static fn ($a, $b) => $b['date'] <=> $a['date']);
+            $json[$mk] = ['payee' => $d['payee'], 'n' => count($tx), 'tx' => array_slice($tx, 0, self::DETAIL_TX),
+                'acc' => array_values(array_unique(array_merge(...array_map(static fn ($x) => array_column($x['splits'], 'account'), $tx)))),
+                'find' => Util::truncate(implode(' | ', array_keys($d['find'])), 4000)];
+        }
+        $detailFile = $this->base.'.payee-details.json';
+        file_put_contents($detailFile, json_encode($json, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE));
         $counts = ['expense' => 0, 'revenue' => 0];
         foreach ($summary as $e) {
             ++$counts[$e['side']];
         }
 
-        return ['files' => [$summaryFile, $mapFile], 'counts' => $counts, 'top' => array_slice($summary, 0, 15)];
+        return ['files' => [$summaryFile, $mapFile, $detailFile], 'counts' => $counts, 'top' => array_slice($summary, 0, 15)];
     }
 
     /**

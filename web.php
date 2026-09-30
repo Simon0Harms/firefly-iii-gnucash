@@ -29,6 +29,7 @@ const FILES = [
     'rules'       => 'book.payee-rules.txt',
     'payees'      => 'book.payees.csv',
     'map'         => 'book.payee-map.csv',
+    'details'     => 'book.payee-details.json',
     'suggestions' => 'book.payee-suggestions.txt',
     'summary'     => 'summary.json',
     'importlog'   => 'book.import-log.jsonl',
@@ -805,6 +806,7 @@ function main(): void
             ''            => page($w, $csrf, $nonce),
             'status'      => apiStatus($w),
             'table'       => apiTable($w),
+            'details'     => apiDetails($w),
             'suggestions' => json(['ok' => true, 'items' => $w->has('suggestions') ? readSuggestions($w->file('suggestions')) : []]),
             'text'        => apiText($w),
             'rulepreview' => apiRulePreview($w),
@@ -871,6 +873,21 @@ function apiTable(Workspace $w): never
         throw new WebError('Unknown table.', 404);
     }
     json(['ok' => true, 'rows' => $w->has($what) ? readCsv($w->file($what)) : [], 'time' => $w->has($what) ? filemtime($w->file($what)) : 0]);
+}
+
+/** Splits per booking text (tooltips, search), gzip-compressed when the browser accepts it. */
+function apiDetails(Workspace $w): never
+{
+    $body = '{"ok":true,"details":'.($w->has('details') ? (string) file_get_contents($w->file('details')) : '{}').'}';
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    if (\function_exists('gzencode') && str_contains((string) ($_SERVER['HTTP_ACCEPT_ENCODING'] ?? ''), 'gzip') && !\ini_get('zlib.output_compression')) {
+        header('Content-Encoding: gzip');
+        header('Vary: Accept-Encoding');
+        $body = (string) gzencode($body, 6);
+    }
+    echo $body;
+    exit;
 }
 
 function apiText(Workspace $w): never
@@ -963,7 +980,7 @@ function apiUpload(Workspace $w): never
     }
     $w->ensure();
     $keep = '1' === (string) ($_POST['keep'] ?? '0');
-    $drop = ['payees', 'map', 'suggestions', 'summary', 'importlog', 'export'];
+    $drop = ['payees', 'map', 'details', 'suggestions', 'summary', 'importlog', 'export'];
     if (!$keep) {
         $drop[] = 'config';
         $drop[] = 'rules';
@@ -1052,6 +1069,15 @@ function apiRulePreview(Workspace $w): never
     if ('category' === $field) {
         $out['notes'][] = t('asst.note_category');
     }
+    if ('konto' === $field) {
+        $out['notes'][] = t('asst.note_konto');
+    }
+    $accOf = [];
+    if ('konto' === $field && $w->has('details')) {
+        foreach ((array) json_decode((string) file_get_contents($w->file('details')), true) as $k => $d) {
+            $accOf[$k] = (array) ($d['acc'] ?? []);
+        }
+    }
     $opts     = bookOptions($w);
     $fallback = (string) ($opts['payee_fallback'] ?? '(diverse)');
     $side     = static fn (string $v): string => 1 === preg_match('/^(Ausgaben|expense)/i', $v) ? 'expense' : 'revenue';
@@ -1068,7 +1094,7 @@ function apiRulePreview(Workspace $w): never
         $hit   = null;
         $sd    = $side((string) $r['firefly_type']);
         foreach ($cats as $c) {
-            if (null !== ($hit = $rules->match($text, $ibans, $c, [], $sd))) {
+            if (null !== ($hit = $rules->match($text, $ibans, $c, [], $sd, $accOf[$text.'|'.$sd] ?? []))) {
                 break;
             }
         }
@@ -1389,8 +1415,15 @@ function textsDe(): array
         'sub.suggestions' => 'Vorschläge',
         'sub.rules'       => 'Regeln',
         'tbl.search'          => 'Suchen',
-        'tbl.search_payees'   => 'Gegenkonto, Buchungstext, Kategorie oder IBAN suchen',
-        'tbl.search_map'      => 'Buchungstext oder Gegenkonto suchen',
+        'tbl.search_payees'   => 'Gegenkonto, Buchungstext, Konto, Split-Memo oder IBAN suchen',
+        'tbl.search_map'      => 'Buchungstext, Gegenkonto, GnuCash-Konto oder Split-Memo suchen',
+        'det.head'            => '{n} Buchungen → {payee}',
+        'det.head.one'        => '1 Buchung → {payee}',
+        'det.split'           => 'Mehrfachbuchung, {n} Splits',
+        'det.more'            => '… und {n} ältere Buchungen (werden auch durchsucht)',
+        'det.none'            => 'Keine Details – bitte neu berechnen.',
+        'det.loading'         => 'Lade Details …',
+        'det.acc_rule'        => 'Regel für alle Buchungen dieses Kontos erstellen (konto:)',
         'tbl.side'            => 'Art',
         'tbl.all_sides'       => 'Ausgaben und Einnahmen',
         'tbl.source'          => 'Herkunft',
@@ -1468,6 +1501,7 @@ function textsDe(): array
         'asst.err_newline'=> 'Regel und Gegenkonto dürfen keinen Zeilenumbruch enthalten.',
         'asst.err_arrow'  => 'Das Gegenkonto darf kein „=>“ enthalten.',
         'asst.note_memo'  => 'memo:-Regeln kann die Vorschau nicht prüfen (die Memos stehen nicht in den Berichten).',
+        'asst.note_konto'    => 'konto: prüft alle GnuCash-Konten der Buchung, z. B. das Bargeld- oder Kartenkonto, von dem bezahlt wurde.',
         'asst.note_category' => 'Bei category:-Regeln ist die Vorschau ungefähr: ein Buchungstext zählt, wenn eine seiner Kategorien passt.',
         'asst.open'       => 'Regel …',
         'asst.open_title' => 'Regel für diesen Eintrag erstellen',
@@ -1740,8 +1774,15 @@ function textsEn(): array
         'sub.suggestions' => 'Suggestions',
         'sub.rules'       => 'Rules',
         'tbl.search'          => 'Search',
-        'tbl.search_payees'   => 'Search counterparty, booking text, category or IBAN',
-        'tbl.search_map'      => 'Search booking text or counterparty',
+        'tbl.search_payees'   => 'Search counterparty, booking text, account, split memo or IBAN',
+        'tbl.search_map'      => 'Search booking text, counterparty, GnuCash account or split memo',
+        'det.head'            => '{n} transactions → {payee}',
+        'det.head.one'        => '1 transaction → {payee}',
+        'det.split'           => 'split transaction, {n} splits',
+        'det.more'            => '… and {n} older transactions (searched as well)',
+        'det.none'            => 'No details – please recalculate.',
+        'det.loading'         => 'Loading details …',
+        'det.acc_rule'        => 'Create a rule for all bookings of this account (konto:)',
         'tbl.side'            => 'Kind',
         'tbl.all_sides'       => 'expenses and revenues',
         'tbl.source'          => 'Source',
@@ -1819,6 +1860,7 @@ function textsEn(): array
         'asst.err_newline'=> 'Rule and counterparty must not contain a line break.',
         'asst.err_arrow'  => 'The counterparty must not contain “=>”.',
         'asst.note_memo'  => 'The preview cannot check memo: rules (the memos are not in the reports).',
+        'asst.note_konto'    => 'konto: checks all GnuCash accounts of the transaction, e.g. the cash or card account it was paid from.',
         'asst.note_category' => 'For category: rules the preview is approximate: a booking text counts when one of its categories matches.',
         'asst.open'       => 'Rule …',
         'asst.open_title' => 'Create a rule for this entry',
@@ -2189,6 +2231,22 @@ tbody tr:hover { background: var(--accent-soft); }
 tbody tr.click { cursor: pointer; }
 td .ex { color: var(--muted); max-width: 42ch; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 td.text { min-width: 16ch; max-width: 46ch; overflow-wrap: break-word; }
+.hov { cursor: help; text-decoration: underline dotted var(--muted); text-underline-offset: 3px; }
+.hov:focus-visible { outline: 2px solid var(--accent, #2563eb); outline-offset: 2px; border-radius: 3px; }
+#tip { position: absolute; z-index: 60; width: max-content; max-width: min(680px, calc(100vw - 32px)); max-height: 60vh; overflow: auto;
+  background: var(--panel, #fff); color: var(--text, inherit); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: .6rem .75rem; font-size: 13px; }
+#tip .tip-h { font-weight: 650; margin-bottom: .35rem; }
+#tip .tip-tx { border-top: 1px solid var(--border); padding: .4rem 0 .2rem; }
+#tip .tip-meta { display: flex; flex-wrap: wrap; gap: .25rem .5rem; align-items: baseline; }
+#tip .tip-meta .d { font-variant-numeric: tabular-nums; color: var(--muted); }
+#tip table { border-collapse: collapse; margin-top: .2rem; width: 100%; }
+#tip td { padding: .1rem .5rem .1rem 0; vertical-align: top; border: 0; }
+#tip td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#tip td.acc { white-space: nowrap; }
+#tip .linkish { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; text-align: left; }
+#tip .linkish:hover, #tip .linkish:focus-visible { text-decoration: underline; color: var(--accent, #2563eb); }
+#tip tr.hit td.acc { font-weight: 650; }
+#tip td.memo { color: var(--muted); overflow-wrap: anywhere; min-width: 14ch; }
 .badge:empty { display: none; }
 tr.changed td { background: color-mix(in srgb, var(--warn-soft) 70%, transparent); }
 .tabletools { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; margin-bottom: .6rem; }
@@ -2687,7 +2745,7 @@ function ask({title, body = [], ok, danger = false, word = null}) {
 // ------------------------------------------------------------------ state
 const S = {
   st: null, tab: 'book', sub: 'payees', dataTime: -1,
-  payees: null, map: null, sugg: null, mapPayee: null,
+  payees: null, map: null, sugg: null, mapPayee: null, det: null,
   rules: {server: '', time: -1, loaded: false, dirty: false},
   cfg: {server: '', time: -1, loaded: false, dirty: false, raw: false, obj: null, orig: null},
   poll: null, jobHidden: null, jobOpen: {}, running: false, lastJobKey: null,
@@ -2743,7 +2801,7 @@ async function refresh() {
   if (!S.running) {
     const f = st.files || {};
     const dt = Math.max(f.payees?.time || 0, f.map?.time || 0, f.summary?.time || 0, f.suggestions?.time || 0);
-    if (dt !== S.dataTime) { S.dataTime = dt; S.payees = S.map = S.sugg = null; }
+    if (dt !== S.dataTime) { S.dataTime = dt; S.payees = S.map = S.sugg = S.det = null; }
     const rt = f.rules?.time || 0;
     if (rt !== S.rules.time && !S.rules.dirty) { S.rules.time = rt; S.rules.loaded = false; }
     const ct = f.config?.time || 0;
@@ -2940,9 +2998,11 @@ class Grid {
     this.more.querySelector('button').addEventListener('click', () => { this.limit += this.page * 2; this.render(); });
   }
   setRows(rows) {
-    this.rows = rows.map(r => Object.assign(r, {_s: this.cols.filter(c => !c.nosort).map(c => String(c.text ? c.text(r) : r[c.key] ?? '')).join('\u0001').toLowerCase()}));
+    this.rows = rows.map(r => Object.assign(r, {_s: this.cols.filter(c => !c.nosort).map(c => String(c.text ? c.text(r) : r[c.key] ?? '')).concat(r._x || '').join('\u0001').toLowerCase()}));
     this.limit = this.page; this.render();
   }
+  /** re-index after r._x (extra search text) changed, keeping page and scroll */
+  reindex() { const l = this.limit; this.setRows(this.rows); this.limit = l; this.render(); }
   render() {
     const terms = this.q.value.toLowerCase().trim().split(/\s+/).filter(Boolean);
     let rows = this.rows.filter(r => terms.every(x => r._s.includes(x)) && (!this.filter || this.filter(r)));
@@ -3000,7 +3060,7 @@ const payeeGrid = new Grid('payees', [
     onRow: r => { S.mapPayee = {name: r.payee, side: r.side}; showSub('map'); renderMapFilter(); mapGrid.render(); }});
 
 const mapGrid = new Grid('map', [
-  {key: 'booking_text', label: t('col.text'), cls: 'text'},
+  {key: 'booking_text', label: t('col.text'), cls: 'text', render: r => hov(r.booking_text, r.side)},
   {key: 'side', label: t('col.side'), text: r => t('kind.' + r.side)},
   {key: 'transactions', label: t('col.count'), num: true, text: r => n(r.transactions), sortv: r => r.transactions},
   {key: 'payee', label: t('col.payee'), cls: 'text'},
@@ -3025,6 +3085,7 @@ async function loadPayees() {
     const d = await api('table', {params: {what: 'payees'}});
     S.payees = d.rows.map(r => ({...r, side: sideOf(r.firefly_type), transactions: Number(r.transactions) || 0}));
     payeeGrid.setRows(S.payees);
+    loadDetails().then(addDetailSearch);
     $('#n-payees').textContent = n(S.payees.length);
     const names = [...new Set(S.payees.map(r => r.payee))].sort((a, b) => a.localeCompare(b, locale));
     $('#payee-names').replaceChildren(...names.map(x => el('option', {value: x})));
@@ -3037,10 +3098,92 @@ async function loadMap() {
     const d = await api('table', {params: {what: 'map'}});
     S.map = d.rows.map(r => ({...r, side: sideOf(r.firefly_type), transactions: Number(r.transactions) || 0}));
     mapGrid.setRows(S.map);
+    loadDetails().then(addDetailSearch);
     renderMapFilter();
     $('#n-map').textContent = n(S.map.length);
   } catch (e) { S.map = null; toast(e.message, true); }
 }
+
+// ------------------------------------------------------------------ booking text details
+// <book>.payee-details.json: per "booking text|side" the newest transactions with all splits
+// (tooltip) and the accounts/memos/numbers/notes of all of them (search).
+function loadDetails() {
+  if (S.det && typeof S.det === 'object' && !(S.det instanceof Promise)) return Promise.resolve(S.det);
+  if (S.det instanceof Promise) return S.det;
+  const p = api('details').then(d => (S.det === p ? (S.det = d.details || {}) : d.details || {}))
+    .catch(e => { if (S.det === p) S.det = null; toast(e.message, true); return {}; });
+  S.det = p;
+  return p;
+}
+function addDetailSearch(det) {
+  if (!det) return;
+  if (Array.isArray(S.map)) {
+    for (const r of S.map) { const d = det[r.booking_text + '|' + r.side]; r._x = d ? d.find : ''; }
+    mapGrid.reindex();
+  }
+  if (Array.isArray(S.payees)) {
+    const by = {};
+    for (const [k, d] of Object.entries(det)) {
+      const side = k.slice(k.lastIndexOf('|') + 1);
+      const key = d.payee + '|' + side;
+      (by[key] ??= []).push(k.slice(0, k.lastIndexOf('|')), d.find);
+    }
+    for (const r of S.payees) r._x = (by[r.payee + '|' + r.side] || []).join('\u0001');
+    payeeGrid.reindex();
+  }
+}
+const hov = (text, side) => el('span', {class: 'hov', tabindex: '0', 'data-text': text, 'data-side': side}, text);
+const money = (a, cur) => { const v = Number(a); return (Number.isFinite(v) ? v.toLocaleString(locale, {minimumFractionDigits: 2, maximumFractionDigits: 4}) : a) + ' ' + cur; };
+function detailBox(text, side, det) {
+  const d = det && det[text + '|' + side];
+  if (!d) return [el('div', {class: 'muted'}, det ? t('det.none') : t('det.loading'))];
+  const out = [el('div', {class: 'tip-h'}, tn('det.head', d.n, {n: n(d.n), payee: d.payee}), ' ', el('span', {class: 'badge'}, t('kind.' + side)))];
+  for (const x of d.tx) {
+    const meta = [el('span', {class: 'd'}, x.date)];
+    if (x.num) meta.push(el('span', {class: 'muted'}, '#' + x.num));
+    meta.push(el('b', {}, x.desc));
+    if (x.splits.length > 2) meta.push(el('span', {class: 'badge'}, t('det.split', {n: x.splits.length})));
+    out.push(el('div', {class: 'tip-tx'}, el('div', {class: 'tip-meta'}, meta),
+      x.notes ? el('div', {class: 'muted small'}, x.notes) : null,
+      el('table', {}, el('tbody', {}, x.splits.map(sp => el('tr', {class: /^(Aufwendungen|Erträge|Expenses?|Income)\b/i.test(sp.account) ? 'hit' : ''},
+        el('td', {class: 'acc'}, el('button', {type: 'button', class: 'linkish', title: t('det.acc_rule'), onclick: () => { hideTip(); openAssistant(fromAccount(sp.account, side)); }}, sp.account)), el('td', {class: 'num'}, money(sp.amount, x.cur)), el('td', {class: 'memo'}, sp.memo)))))));
+  }
+  if (d.n > d.tx.length) out.push(el('div', {class: 'muted small'}, t('det.more', {n: n(d.n - d.tx.length)})));
+  return out;
+}
+/** assistant start values for a "konto:" rule on a GnuCash account (limited to the side) */
+function fromAccount(path, side) {
+  const esc = path.replace(/[\\.+*?\[\]^$(){}|\/]/g, '\\$&');
+  return {query: '', mode: 'words', target: path.split(':').pop(), rule: (side === 'revenue' ? 'einnahme:' : 'ausgabe:') + 'konto:/^' + esc + '$/'};
+}
+const tip = el('div', {id: 'tip', role: 'tooltip', hidden: true});
+document.body.append(tip);
+let tipFor = null, tipTimer = null;
+function placeTip(a) {
+  const r = a.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
+  const left = Math.max(8, Math.min(r.left, document.documentElement.clientWidth - w - 8));
+  const below = r.bottom + 6 + h <= innerHeight || r.top - 6 - h < 0;
+  tip.style.left = (left + scrollX) + 'px';
+  tip.style.top = ((below ? r.bottom + 6 : r.top - 6 - h) + scrollY) + 'px';
+}
+function showTip(a) {
+  tipFor = a;
+  const fill = det => { if (tipFor !== a) return; tip.replaceChildren(...detailBox(a.dataset.text, a.dataset.side, det)); tip.hidden = false; placeTip(a); };
+  fill(S.det && !(S.det instanceof Promise) ? S.det : null);
+  if (!S.det || S.det instanceof Promise) loadDetails().then(fill);
+  a.setAttribute('aria-describedby', 'tip');
+}
+function hideTip() { clearTimeout(tipTimer); if (tipFor) tipFor.removeAttribute('aria-describedby'); tipFor = null; tip.hidden = true; }
+document.addEventListener('mouseover', e => {
+  const a = e.target.closest && e.target.closest('.hov');
+  if (a) { clearTimeout(tipTimer); if (tipFor !== a) tipTimer = setTimeout(() => showTip(a), 250); return; }
+  if (e.target.closest && e.target.closest('#tip')) { clearTimeout(tipTimer); return; }
+  if (tipFor || tipTimer) { clearTimeout(tipTimer); tipTimer = setTimeout(hideTip, 200); }
+});
+document.addEventListener('focusin', e => { const a = e.target.closest && e.target.closest('.hov'); if (a) { clearTimeout(tipTimer); showTip(a); } });
+document.addEventListener('focusout', e => { if (e.target.closest && e.target.closest('.hov')) { clearTimeout(tipTimer); tipTimer = setTimeout(hideTip, 200); } });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && tipFor) hideTip(); });
+addEventListener('scroll', () => { if (tipFor && !tip.hidden) placeTip(tipFor); }, {passive: true});
 
 // ------------------------------------------------------------------ suggestions
 let suggLimit = 100;
@@ -3189,7 +3332,7 @@ function renderAssistant(d) {
   $('#as-n').textContent = tot.texts ? n(tot.texts) : '';
   const head = el('tr', {}, [t('col.text'), t('col.side'), t('col.count'), t('asst.col_now'), '', t('asst.col_new')].map((x, i) => el('th', {class: i === 2 ? 'num' : ''}, x)));
   $('#as-table').replaceChildren(el('thead', {}, head), el('tbody', {}, (d.matches || []).map(m => el('tr', {class: m.changes ? '' : 'same'},
-    el('td', {class: 'text'}, m.text), el('td', {}, t('kind.' + m.side)), el('td', {class: 'num'}, n(m.count)),
+    el('td', {class: 'text'}, hov(m.text, m.side)), el('td', {}, t('kind.' + m.side)), el('td', {class: 'num'}, n(m.count)),
     el('td', {class: 'text'}, m.payee, ' ', el('span', {class: 'muted small'}, srcLabel(m.source))), el('td', {class: 'arrow'}, '→'),
     el('td', {class: 'text new'}, m.kept ? [m.payee, ' ', el('span', {class: 'badge warn'}, t('asst.kept_badge'))] : (m.new || '?'))))));
   $('#as-more').hidden = !d.more;
@@ -3197,7 +3340,7 @@ function renderAssistant(d) {
   const sim = d.similar || [];
   $('#as-similar-box').hidden = !sim.length;
   $('#as-similar').replaceChildren(el('thead', {}, el('tr', {}, [t('col.text'), t('col.side'), t('col.count'), t('col.payee')].map((x, i) => el('th', {class: i === 2 ? 'num' : ''}, x)))),
-    el('tbody', {}, sim.map(m => el('tr', {}, el('td', {class: 'text'}, m.text), el('td', {}, t('kind.' + m.side)), el('td', {class: 'num'}, n(m.count)), el('td', {class: 'text'}, m.payee)))));
+    el('tbody', {}, sim.map(m => el('tr', {}, el('td', {class: 'text'}, hov(m.text, m.side)), el('td', {}, t('kind.' + m.side)), el('td', {class: 'num'}, n(m.count)), el('td', {class: 'text'}, m.payee)))));
 }
 /** Inserts a rule line after all rules or before the first one (and its comment block). */
 function insertRule(line, position) {
@@ -3521,7 +3664,7 @@ $('#reset').addEventListener('click', async () => {
     await api('reset', {method: 'POST', json: {}});
     S.rules = {server: '', time: -1, loaded: false, dirty: false};
     S.cfg = {server: '', time: -1, loaded: false, dirty: false, raw: false, obj: null, orig: null};
-    S.payees = S.map = S.sugg = null; S.dataTime = -1;
+    S.payees = S.map = S.sugg = S.det = null; S.dataTime = -1;
     $('#rules-text').value = ''; markDirty();
     showTab('book');
     refresh();

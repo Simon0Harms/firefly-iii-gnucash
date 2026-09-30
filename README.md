@@ -56,6 +56,7 @@ php firefly-gnucash.php plan  meinbuch.gnucash
 #   -> meinbuch.payee-rules.txt      rules for counterparties       (edit)
 #   -> meinbuch.payees.csv           resulting counterparties       (check)
 #   -> meinbuch.payee-map.csv        booking text -> counterparty   (check)
+#   -> meinbuch.payee-details.json   splits per booking text (tooltips in web.php)
 #   -> meinbuch.payee-suggestions.txt  proposed merge rules         (copy what you like)
 # edit, run plan again, repeat until the counterparties look right
 
@@ -78,7 +79,10 @@ with progress, export and compare, and delete test imports. **Create rule** turn
 (e.g. `DB Hamburg`: words in this order, all words in any order, text begins with / contains it,
 optionally only in the recipient name after the last `;`) into a rule and shows before saving
 which booking texts it catches, which counterparty they have now and get then, and similar texts
-it misses; suggestions and every row of the counterparty tables can be opened there to adjust. It calls `firefly-gnucash.php` next to it, so both files belong together. Every browser
+it misses; suggestions and every row of the counterparty tables can be opened there to adjust. Hovering
+a booking text shows its transactions with all splits (GnuCash accounts, amounts, memos, main
+description of split transactions); the table search also finds accounts and split memos, and a
+click on an account in that box opens a `konto:` rule for it. It calls `firefly-gnucash.php` next to it, so both files belong together. Every browser
 only sees its own uploads.
 
 **Quick start** on the machine with the files (from elsewhere: `ssh -L 8090:127.0.0.1:8090 host`):
@@ -185,6 +189,7 @@ GnuCash has none. The counterparty is derived from the booking text:
    memo:/Gutschein/i                         => -
    ausgabe:Platinum                          => Platinum
    einnahme:/Erstattung/i                    => Erstattungen
+   konto:/:Kantine$/                         => Kantine
    ```
    Example – Amazon per country (tested with a real book):
    ```
@@ -202,7 +207,8 @@ GnuCash has none. The counterparty is derived from the booking text:
    resales are left out of the last rule.
 
    Patterns: `/regex/flags`, plain text (case-insensitive substring), `iban:`, `category:`,
-   `memo:`. A leading `ausgabe:` (or `expense:`) / `einnahme:` (or `revenue:`) limits a rule to
+   `memo:`, `konto:` (any GnuCash account of the transaction, full path – e.g. the cash or card
+   account it was paid from). A leading `ausgabe:` (or `expense:`) / `einnahme:` (or `revenue:`) limits a rule to
    withdrawals / deposits and can be combined with the others (`ausgabe:iban:DE…`,
    `einnahme:category:/^Erträge/`). The counterparty may use `$1…$9`, `{category}`, `{description}`; `-` means the
    fallback counterparty. A text rule changes only the bookings whose text it matches – other
