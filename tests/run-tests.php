@@ -345,6 +345,14 @@ $kr = FireflyGnuCash\PayeeRules::load($rf);
 check('konto rule', 'Casino' === ($kr->match('Currywurst', [], 'Lebensmittel', [], 'expense', ['Aufwendungen:Lebensmittel', 'Aktiva:Barvermögen:Casino'])[0] ?? null)
     && 'Bar' === ($kr->match('Currywurst', [], 'Lebensmittel', [], 'revenue', ['Aktiva:Barvermögen:Casino'])[0] ?? null)
     && null === $kr->match('Currywurst', [], 'Lebensmittel', [], 'expense', ['Aktiva:Girokonto']));
+// "&&": all conditions must match, $1 from the first one
+file_put_contents($rf, "/Abrechnung (\\d+)/i && konto:/Bankgebühren:Musterbank$/ => Musterbank $1\nausgabe:/Abrechnung/i && memo:/Porto/i => Porto\n");
+$and = FireflyGnuCash\PayeeRules::load($rf);
+check('and rule: both match', 'Musterbank 2024' === ($and->match('Abrechnung 2024', [], '', [], 'expense', ['Aktiva:Giro', 'Aufwendungen:Bankgebühren:Musterbank'])[0] ?? null));
+check('and rule: one missing', null === $and->match('Abrechnung 2024', [], '', [], 'expense', ['Aktiva:Giro', 'Aufwendungen:Sonstiges'])
+    && null === $and->match('Zinsen', [], '', [], 'expense', ['Aufwendungen:Bankgebühren:Musterbank']));
+check('and rule with side and memo', 'Porto' === ($and->match('Abrechnung Q1', [], '', ['Porto 0,70'], 'expense')[0] ?? null)
+    && null === $and->match('Abrechnung Q1', [], '', ['Porto 0,70'], 'revenue'));
 // rule assistant: patterns built from typed text (PayeeRules::build) and what they match
 $bt = static function (string $query, string $mode = 'words', bool $nameOnly = false) use ($rf): FireflyGnuCash\PayeeRules {
     file_put_contents($rf, FireflyGnuCash\PayeeRules::build($query, $mode, $nameOnly)." => X\n");

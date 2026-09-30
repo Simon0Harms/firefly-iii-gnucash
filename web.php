@@ -1062,18 +1062,18 @@ function apiRulePreview(Workspace $w): never
     } finally {
         @unlink($tmp);
     }
-    $field = $rules->rules[0]['field'] ?? 'desc';
-    if ('memo' === $field) {
+    $fields = array_column($rules->rules[0]['conds'] ?? [], 'field');
+    if (\in_array('memo', $fields, true)) {
         $out['notes'][] = t('asst.note_memo');
     }
-    if ('category' === $field) {
+    if (\in_array('category', $fields, true)) {
         $out['notes'][] = t('asst.note_category');
     }
-    if ('konto' === $field) {
+    if (\in_array('konto', $fields, true)) {
         $out['notes'][] = t('asst.note_konto');
     }
     $accOf = [];
-    if ('konto' === $field && $w->has('details')) {
+    if (\in_array('konto', $fields, true) && $w->has('details')) {
         foreach ((array) json_decode((string) file_get_contents($w->file('details')), true) as $k => $d) {
             $accOf[$k] = (array) ($d['acc'] ?? []);
         }

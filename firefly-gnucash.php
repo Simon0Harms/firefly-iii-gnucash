@@ -1123,7 +1123,7 @@ final class ImportConfig
 
 final class PayeeRules
 {
-    /** @var list<array{line:int, side:string, field:string, regex:?string, text:?string, payee:string}> */
+    /** @var list<array{line:int, side:string, field:string, conds:list<array{field:string, regex:?string, text:?string}>, payee:string}> */
     public array $rules = [];
 
     public const TEMPLATE = <<<'TXT'
@@ -1142,6 +1142,8 @@ final class PayeeRules
         #                       cash or card account it was paid from
         # Put "ausgabe:" (expense) or "einnahme:" (revenue) in front to limit a rule to
         # withdrawals or deposits, e.g.  ausgabe:Platinum  or  einnahme:category:/^Erträge/
+        # "&&" joins conditions that must all match:  /Abrechnung/i && konto:/:Bankgebühren/
+        # ($1..$9 then come from the first condition).
         # <counterparty> may use $1..$9 (regex groups), {category} and {description};
         # "-" means: use the fallback counterparty (option payee_fallback).
         # Transactions without a matching rule get an automatic counterparty (name after ";"
@@ -1176,35 +1178,48 @@ final class PayeeRules
             }
             $pattern = trim(substr($line, 0, $pos));
             $payee   = trim(substr($line, $pos + 2));
-            $field   = 'desc';
-            $side    = '';
-            if (1 === preg_match('/^(ausgaben?|expense|einnahmen?|revenue):\s*(.*)$/is', $pattern, $m)) {
-                $side    = 1 === preg_match('/^(ausgaben?|expense)$/i', $m[1]) ? 'expense' : 'revenue';
-                $pattern = trim($m[2]);
-            }
-            if (1 === preg_match('/^(desc|iban|category|memo|konto|account):(.*)$/s', $pattern, $m)) {
-                $field   = 'account' === $m[1] ? 'konto' : $m[1];
-                $pattern = trim($m[2]);
-            }
             if ('' === $pattern || '' === $payee) {
                 throw new UserError(sprintf('%s:%d: empty pattern or payee', $file, $no + 1));
             }
-            $regex = null;
-            $text  = null;
-            if ('iban' === $field) {
-                $text = Util::normalizeIban($pattern);
-            } elseif (1 === preg_match('~^/.*/[a-zA-Z]*$~s', $pattern)) {
-                $regex = $pattern;
-                if (!str_contains(substr($regex, strrpos($regex, '/')), 'u')) {
-                    $regex .= 'u';
+            // "cond && cond": all conditions must match; "ausgabe:"/"einnahme:" may lead any of them
+            $side  = '';
+            $conds = [];
+            foreach (preg_split('/\s+&&\s+/', $pattern) ?: [] as $c) {
+                $c     = trim($c);
+                $field = 'desc';
+                if (1 === preg_match('/^(ausgaben?|expense|einnahmen?|revenue):\s*(.*)$/is', $c, $m)) {
+                    $cs = 1 === preg_match('/^(ausgaben?|expense)$/i', $m[1]) ? 'expense' : 'revenue';
+                    if ('' !== $side && $side !== $cs) {
+                        throw new UserError(sprintf('%s:%d: rule is limited to both expenses and revenues', $file, $no + 1));
+                    }
+                    $side = $cs;
+                    $c    = trim($m[2]);
                 }
-                if (false === @preg_match($regex, '')) {
-                    throw new UserError(sprintf('%s:%d: invalid regular expression %s', $file, $no + 1, $pattern));
+                if (1 === preg_match('/^(desc|iban|category|memo|konto|account):(.*)$/s', $c, $m)) {
+                    $field = 'account' === $m[1] ? 'konto' : $m[1];
+                    $c     = trim($m[2]);
                 }
-            } else {
-                $text = Util::lower($pattern);
+                if ('' === $c) {
+                    throw new UserError(sprintf('%s:%d: empty pattern or payee', $file, $no + 1));
+                }
+                $regex = null;
+                $text  = null;
+                if ('iban' === $field) {
+                    $text = Util::normalizeIban($c);
+                } elseif (1 === preg_match('~^/.*/[a-zA-Z]*$~s', $c)) {
+                    $regex = $c;
+                    if (!str_contains(substr($regex, strrpos($regex, '/')), 'u')) {
+                        $regex .= 'u';
+                    }
+                    if (false === @preg_match($regex, '')) {
+                        throw new UserError(sprintf('%s:%d: invalid regular expression %s', $file, $no + 1, $c));
+                    }
+                } else {
+                    $text = Util::lower($c);
+                }
+                $conds[] = ['field' => $field, 'regex' => $regex, 'text' => $text];
             }
-            $r->rules[] = ['line' => $no + 1, 'side' => $side, 'field' => $field, 'regex' => $regex, 'text' => $text, 'payee' => $payee];
+            $r->rules[] = ['line' => $no + 1, 'side' => $side, 'field' => $conds[0]['field'], 'conds' => $conds, 'payee' => $payee];
         }
 
         return $r;
@@ -1267,35 +1282,44 @@ final class PayeeRules
             if ('' !== $rule['side'] && $rule['side'] !== $side) {
                 continue;
             }
-            $subjects = match ($rule['field']) {
-                'desc'     => [$description],
-                'category' => [$category],
-                'memo'     => $memos,
-                'konto'    => $accounts,
-                'iban'     => $ibans,
-            };
-            foreach ($subjects as $subject) {
-                $groups = [];
-                if ('iban' === $rule['field']) {
-                    $hit = $subject === $rule['text'];
-                } elseif (null !== $rule['regex']) {
-                    $hit = 1 === preg_match($rule['regex'], $subject, $groups);
-                } else {
-                    $hit = str_contains(Util::lower($subject), (string) $rule['text']);
+            $groups = null;                                  // regex groups of the first condition
+            foreach ($rule['conds'] as $cond) {
+                $subjects = match ($cond['field']) {
+                    'desc'     => [$description],
+                    'category' => [$category],
+                    'memo'     => $memos,
+                    'konto'    => $accounts,
+                    'iban'     => $ibans,
+                };
+                $hit = false;
+                foreach ($subjects as $subject) {
+                    $g = [];
+                    if ('iban' === $cond['field']) {
+                        $hit = $subject === $cond['text'];
+                    } elseif (null !== $cond['regex']) {
+                        $hit = 1 === preg_match($cond['regex'], $subject, $g);
+                    } else {
+                        $hit = str_contains(Util::lower($subject), (string) $cond['text']);
+                    }
+                    if ($hit) {
+                        $groups ??= $g;
+                        break;
+                    }
                 }
                 if (!$hit) {
-                    continue;
+                    continue 2;
                 }
-                $payee = $rule['payee'];
-                if ('-' === $payee) {
-                    return ['-', $rule['line']];
-                }
-                $payee = (string) preg_replace_callback('/\$(\d)/', static fn ($m) => $groups[(int) $m[1]] ?? '', $payee);
-                $payee = str_replace(['{category}', '{description}'], [$category, $description], $payee);
-                $payee = Util::collapse($payee);
-
-                return ['' === $payee ? '-' : $payee, $rule['line']];
             }
+            $groups ??= [];
+            $payee  = $rule['payee'];
+            if ('-' === $payee) {
+                return ['-', $rule['line']];
+            }
+            $payee = (string) preg_replace_callback('/\$(\d)/', static fn ($m) => $groups[(int) $m[1]] ?? '', $payee);
+            $payee = str_replace(['{category}', '{description}'], [$category, $description], $payee);
+            $payee = Util::collapse($payee);
+
+            return ['' === $payee ? '-' : $payee, $rule['line']];
         }
 
         return null;

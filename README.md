@@ -190,6 +190,7 @@ GnuCash has none. The counterparty is derived from the booking text:
    ausgabe:Platinum                          => Platinum
    einnahme:/Erstattung/i                    => Erstattungen
    konto:/:Kantine$/                         => Kantine
+   /Abrechnung/i && konto:/:Bankgebühren/    => Bank
    ```
    Example – Amazon per country (tested with a real book):
    ```
@@ -210,7 +211,9 @@ GnuCash has none. The counterparty is derived from the booking text:
    `memo:`, `konto:` (any GnuCash account of the transaction, full path – e.g. the cash or card
    account it was paid from). A leading `ausgabe:` (or `expense:`) / `einnahme:` (or `revenue:`) limits a rule to
    withdrawals / deposits and can be combined with the others (`ausgabe:iban:DE…`,
-   `einnahme:category:/^Erträge/`). The counterparty may use `$1…$9`, `{category}`, `{description}`; `-` means the
+   `einnahme:category:/^Erträge/`). ` && ` joins conditions that must all match:
+   `/Abrechnung/i && konto:/:Bankgebühren:Musterbank$/ => Musterbank` (`$1…$9` come from the first
+   condition). The counterparty may use `$1…$9`, `{category}`, `{description}`; `-` means the
    fallback counterparty. A text rule changes only the bookings whose text it matches – other
    texts with the same IBAN keep their own counterparty; `iban:` moves all bookings of an IBAN.
    A text pattern also matches the purpose of a transfer to someone else
