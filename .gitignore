@@ -1,0 +1,11 @@
+# your books and generated reports never belong in the repo
+*.gnucash
+*.gnucash.*
+*.sqlite
+*.import.json
+*.payee-rules.txt
+*.payees.csv
+*.payee-map.csv
+*.payee-suggestions.txt
+*.import-log.jsonl
+token*
