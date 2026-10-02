@@ -144,6 +144,8 @@ check('assistant builds the rule', '/\bREWE\s+Musterstadt\b/i' === ($r['pattern'
 check('assistant: earlier rule keeps its texts at the end', ($r['totals']['texts'] ?? 0) > 0 && $r['totals']['kept'] === $r['totals']['bookings'] && 0 === $r['totals']['changed'], json_encode($r['totals'] ?? null));
 $r = $pv(['query' => 'REWE Musterstadt', 'mode' => 'words', 'target' => 'REWE Markt', 'position' => 'top']);
 check('assistant: before all rules it wins', ($r['totals']['changed'] ?? 0) === ($r['totals']['bookings'] ?? -1) && 'REWE Markt' === ($r['matches'][0]['new'] ?? null) && 'REWE' === ($r['matches'][0]['payee'] ?? null), json_encode($r['matches'][0] ?? null));
+$r = $pv(['query' => 'REWE Musterstadt', 'mode' => 'words', 'target' => 'REWE Markt', 'position' => 'end', 'only_changed' => true]);
+check('assistant: only_changed hides unaffected texts, totals stay', [] === ($r['matches'] ?? ['x']) && ($r['totals']['kept'] ?? 0) > 0, json_encode($r['totals'] ?? null));
 $r = $pv(['query' => 'Musterstadt REWE', 'mode' => 'words', 'target' => 'X']);
 check('assistant: wrong order finds nothing, but similar texts', 0 === ($r['totals']['texts'] ?? -1) && [] !== ($r['similar'] ?? []), json_encode($r['similar'] ?? null));
 $r = $pv(['query' => 'Musterstadt REWE', 'mode' => 'all', 'target' => 'X', 'position' => 'top']);

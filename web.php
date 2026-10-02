@@ -1035,6 +1035,7 @@ function apiRulePreview(Workspace $w): never
     $b        = body();
     $mode     = \in_array($b['mode'] ?? '', ['words', 'all', 'start', 'text'], true) ? (string) $b['mode'] : 'words';
     $nameOnly = !empty($b['name_only']);
+    $onlyChg  = !empty($b['only_changed']);
     $query    = trim((string) ($b['query'] ?? ''));
     $custom   = trim((string) ($b['rule'] ?? ''));
     $target   = trim((string) ($b['target'] ?? ''));
@@ -1133,6 +1134,10 @@ function apiRulePreview(Workspace $w): never
     usort($similar, static fn ($a, $b) => [$b['count'], $a['text']] <=> [$a['count'], $b['text']]);
     arsort($affected);
     arsort($names);
+    if ($onlyChg) {
+        $matches = array_values(array_filter($matches, static fn (array $m): bool => $m['changes']));
+        $similar = [];
+    }
     $out['more']     = max(0, \count($matches) - 300);
     $out['matches']  = \array_slice($matches, 0, 300);
     $out['similar']  = \array_slice($similar, 0, 30);
@@ -1480,6 +1485,8 @@ function textsDe(): array
         'asst.insert'     => 'Nur in den Editor',
         'asst.save'       => 'Übernehmen & neu berechnen',
         'asst.none'       => 'Kein Buchungstext passt zu dieser Regel.',
+        'asst.only_changed'      => 'Nicht betroffene Buchungen ausblenden',
+        'asst.only_changed_help' => 'Zeigt in der Trefferliste nur Buchungstexte, deren Gegenkonto sich durch die Regel ändert; unveränderte, von früheren Regeln behaltene und ähnliche Texte werden ausgeblendet.',
         'asst.summary'    => 'Erfasst {texts} Buchungstexte mit {bookings} Buchungen.',
         'asst.summary.one'=> 'Erfasst 1 Buchungstext mit {bookings} Buchungen.',
         'asst.changed'    => '{n} Buchungen bekommen das Gegenkonto „{target}“.',
@@ -1839,6 +1846,8 @@ function textsEn(): array
         'asst.insert'     => 'Only into the editor',
         'asst.save'       => 'Adopt & recalculate',
         'asst.none'       => 'No booking text matches this rule.',
+        'asst.only_changed'      => 'Hide unaffected bookings',
+        'asst.only_changed_help' => 'Lists only booking texts whose counterparty the rule changes; unchanged texts, texts kept by earlier rules and similar texts are hidden.',
         'asst.summary'    => 'Catches {texts} booking texts with {bookings} transactions.',
         'asst.summary.one'=> 'Catches 1 booking text with {bookings} transactions.',
         'asst.changed'    => '{n} transactions get the counterparty “{target}”.',
@@ -2463,6 +2472,7 @@ footer.foot a { color: var(--muted); }
           </label>
         </div>
         <label class="check mt2"><input type="checkbox" id="as-name"> <span><?= $L('asst.name_only') ?><br><span class="help"><?= $L('asst.name_only_help') ?></span></span></label>
+        <label class="check mt2"><input type="checkbox" id="as-only"> <span><?= $L('asst.only_changed') ?><br><span class="help"><?= $L('asst.only_changed_help') ?></span></span></label>
         <div class="chips mt1" id="as-names"></div>
         <div class="mt2">
           <label class="field" for="as-rule"><?= $L('asst.rule') ?> <span class="badge" id="as-custom" hidden><?= $L('asst.rule_custom') ?></span></label>
@@ -3274,7 +3284,7 @@ async function preview() {
   const q = $('#as-q').value;
   if (!A.targetTouched) $('#as-target').value = q.trim();
   const seq = ++A.seq;
-  const body = {query: q, mode: $('#as-mode').value, name_only: $('#as-name').checked, rule: A.custom ? $('#as-rule').value : '',
+  const body = {query: q, mode: $('#as-mode').value, name_only: $('#as-name').checked, only_changed: $('#as-only').checked, rule: A.custom ? $('#as-rule').value : '',
     target: $('#as-target').value, position: $('#as-pos').value};
   let d;
   try { d = await api('rulepreview', {method: 'POST', json: body, raw: true}); } catch (e) { toast(e.message, true); return; }
@@ -3381,6 +3391,8 @@ $('#as-q').addEventListener('input', previewSoon);
 $('#as-mode').addEventListener('change', () => { setCustom(false); preview(); });
 $('#as-name').addEventListener('change', () => { setCustom(false); preview(); });
 $('#as-pos').addEventListener('change', () => preview());
+try { $('#as-only').checked = localStorage.getItem('ffgc.as-only') === '1'; } catch (e) {}
+$('#as-only').addEventListener('change', () => { try { localStorage.setItem('ffgc.as-only', $('#as-only').checked ? '1' : '0'); } catch (e) {} preview(); });
 $('#as-target').addEventListener('input', () => { A.targetTouched = true; previewSoon(); });
 $('#as-rule').addEventListener('input', () => { setCustom(true); previewSoon(); });
 $('#as-rule-reset').addEventListener('click', () => { setCustom(false); preview(); });
