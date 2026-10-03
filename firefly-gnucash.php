@@ -2159,7 +2159,8 @@ final class Decomposer
         $pair($plDst, $bsSrc, true, false);   // expenses (and income reversals) paid from asset/liability accounts
         $pair($plSrc, $bsDst, false, false);  // income (and refunds) received on asset/liability accounts
         $pair($bsDst, $bsSrc, true, true);    // transfers between asset/liability accounts
-        $left = 0;
+        $left     = 0;
+        $leftAcct = [];
         foreach ($srcCap as $i => $c) {
             if ($c > 0) {
                 if (!$isBsNode($i)) {
@@ -2168,10 +2169,12 @@ final class Decomposer
                     return $plan;
                 }
                 $left += $c;
+                $a     = $acctOf($i);
+                $leftAcct[$a] = '#clearing' === $a ? $this->clearingName : $this->book->account($a)->path;
             }
         }
         if ($left > 0) {
-            $plan->warnings[] = sprintf('%s %s moved from an account to itself - dropped', Util::minorToDec($left, $txDec), $t->currency);
+            $plan->warnings[] = sprintf('%s %s moved from an account to itself (%s) - dropped', Util::minorToDec($left, $txDec), $t->currency, implode(', ', $leftAcct));
         }
         if ([] === $flows) {
             $plan->skip = 'nothing left to import';
@@ -2566,7 +2569,7 @@ final class Pipeline
                 ++$s['clearing'];
             }
             foreach ($p->warnings as $w) {
-                $k                   = (string) preg_replace(['/"[^"]*"/', '/-?\d+(\.\d+)?/'], ['"…"', 'N'], $w);
+                $k                   = (string) preg_replace(['/"[^"]*"/', '/ \([^()]*\)(?= - )/', '/-?\d+(\.\d+)?/'], ['"…"', ' (…)', 'N'], $w);
                 $s['warnings'][$k][] = sprintf('%s %s: %s', $p->tx->date, Util::truncate($p->tx->description, 40), $w);
             }
         }
