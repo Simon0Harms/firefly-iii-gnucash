@@ -2810,7 +2810,8 @@ final class Pipeline
         }
         $warnings = [];
         foreach ($st['warnings'] as $examples) {
-            $warnings[] = ['count' => count($examples), 'example' => $examples[0]];
+            // all occurrences for web.php (expandable list), capped to keep summary.json small
+            $warnings[] = ['count' => count($examples), 'example' => $examples[0], 'all' => array_slice($examples, 0, 1000)];
         }
 
         return [

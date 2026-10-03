@@ -1380,6 +1380,7 @@ function textsDe(): array
         'sum.not_imported'=> 'Nicht importiert (gibt es in Firefly nicht): {list}',
         'sum.rules'       => '{rules} Regeln aktiv, {sugg} Vorschläge zum Zusammenfassen',
         'sum.warnings'    => 'Warnungen ({n})',
+        'sum.warn_more'   => '… und {n} weitere',
         'sum.config_msgs' => 'Änderungen an der Kontenzuordnung ({n})',
         'sum.top'         => 'Häufigste Gegenkonten',
         'sum.downloads'   => 'Dateien herunterladen',
@@ -1758,6 +1759,7 @@ function textsEn(): array
         'sum.not_imported'=> 'Not imported (no Firefly equivalent): {list}',
         'sum.rules'       => '{rules} rules active, {sugg} merge suggestions',
         'sum.warnings'    => 'Warnings ({n})',
+        'sum.warn_more'   => '… and {n} more',
         'sum.config_msgs' => 'Changes to the account mapping ({n})',
         'sum.top'         => 'Most used counterparties',
         'sum.downloads'   => 'Download files',
@@ -2270,6 +2272,8 @@ pre.log .w { color: var(--warn); }
 pre.log .e { color: var(--bad); font-weight: 600; }
 pre.log .s { color: var(--accent); font-weight: 600; }
 details > summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+.warnlist details > summary { font-size: inherit; color: inherit; }
+.warnlist ol { margin: .3rem 0 .5rem; padding-left: 2.2rem; max-height: 40vh; overflow: auto; overflow-wrap: anywhere; }
 details[open] > summary { margin-bottom: .5rem; }
 
 .sugg { border: 1px solid var(--border); border-radius: 9px; padding: .55rem .7rem; display: flex; gap: .8rem; align-items: center; background: var(--panel); }
@@ -2943,7 +2947,11 @@ function renderSummary(sum, job) {
   kids.push(el('ul', {class: 'facts'}, facts.map(x => el('li', {}, x))));
   if ((sum.warnings || []).length) {
     kids.push(el('details', {}, el('summary', {}, t('sum.warnings', {n: n(sum.warnings.length)})),
-      el('ul', {class: 'facts small'}, sum.warnings.map(w => el('li', {}, `${n(w.count)}× ${w.example}`)))));
+      el('ul', {class: 'facts small warnlist'}, sum.warnings.map(w => (w.all || []).length > 1
+        ? el('li', {}, el('details', {}, el('summary', {}, `${n(w.count)}× ${w.example}`),
+            el('ol', {class: 'small'}, w.all.map(x => el('li', {}, x))),
+            w.count > w.all.length ? el('div', {class: 'muted small'}, t('sum.warn_more', {n: n(w.count - w.all.length)})) : null))
+        : el('li', {}, `${n(w.count)}× ${w.example}`)))));
   }
   if ((sum.config_messages || []).length) {
     kids.push(el('details', {}, el('summary', {}, t('sum.config_msgs', {n: n(sum.config_messages.length)})),
