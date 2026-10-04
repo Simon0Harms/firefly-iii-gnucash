@@ -2642,7 +2642,8 @@ final class Pipeline
             ];
         }
 
-        return ['date' => $t->date, 'desc' => Util::collapse($t->description), 'num' => $t->num, 'notes' => Util::collapse($t->notes), 'cur' => $t->currency, 'splits' => $splits];
+        return ['date' => $t->date, 'desc' => Util::collapse($t->description), 'num' => $t->num, 'notes' => Util::collapse($t->notes), 'cur' => $t->currency,
+            'ibans' => PayeeResolver::ibansOf($t), 'splits' => $splits];
     }
 
     /** Payee summary (one row per counterparty) and payee map (one row per booking text). */
@@ -2740,6 +2741,7 @@ final class Pipeline
             $json[$mk] = ['payee' => $d['payee'], 'n' => count($tx), 'tx' => array_slice($tx, 0, self::DETAIL_TX),
                 'acc' => array_values(array_unique(array_merge(...array_map(static fn ($x) => array_column($x['splits'], 'account'), $tx)))),
                 'memo' => array_values(array_unique(array_filter(array_merge(...array_map(static fn ($x) => array_column($x['splits'], 'memo'), $tx)), static fn ($m) => '' !== $m))),
+                'ibans' => array_values(array_unique(array_merge(...array_map(static fn ($x) => $x['ibans'], $tx)))),
                 'find' => Util::truncate(implode(' | ', array_keys($d['find'])), 20000)];
         }
         $detailFile = $this->base.'.payee-details.json';

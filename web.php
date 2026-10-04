@@ -1025,6 +1025,11 @@ function bookOptions(Workspace $w): array
  * booking texts it catches and which counterparty they get. Based on the last calculation:
  * a text already caught by an earlier rule keeps it unless the rule goes before all rules.
  */
+function sideOfRow(array $r): string
+{
+    return 1 === preg_match('/^(Ausgaben|expense)/i', (string) $r['firefly_type']) ? 'expense' : 'revenue';
+}
+
 function apiRulePreview(Workspace $w): never
 {
     requirePost();
@@ -1075,10 +1080,12 @@ function apiRulePreview(Workspace $w): never
     }
     $accOf  = [];
     $memoOf = [];
-    if (([] !== array_intersect(['konto', 'memo'], $fields)) && $w->has('details')) {
+    $ibanOf = [];
+    if (([] !== array_intersect(['konto', 'memo', 'iban'], $fields)) && $w->has('details')) {
         foreach ((array) json_decode((string) file_get_contents($w->file('details')), true) as $k => $d) {
             $accOf[$k]  = (array) ($d['acc'] ?? []);
             $memoOf[$k] = (array) ($d['memo'] ?? []);
+            $ibanOf[$k] = (array) ($d['ibans'] ?? []);   // incl. settlement IBANs the report column hides
         }
     }
     $opts     = bookOptions($w);
@@ -1094,6 +1101,10 @@ function apiRulePreview(Workspace $w): never
         $text  = (string) $r['booking_text'];
         $cats  = '' === (string) $r['categories'] ? [''] : explode(' | ', (string) $r['categories']);
         $ibans = array_values(array_filter(explode(' ', (string) $r['iban'])));
+        $sdx   = sideOfRow($r);
+        if (isset($ibanOf[$r['booking_text'].'|'.$sdx])) {
+            $ibans = $ibanOf[$r['booking_text'].'|'.$sdx];
+        }
         $hit   = null;
         $sd    = $side((string) $r['firefly_type']);
         if (\in_array('auto', $fields, true)) {
@@ -1437,6 +1448,7 @@ function textsDe(): array
         'det.none'            => 'Keine Details – bitte neu berechnen.',
         'det.loading'         => 'Lade Details …',
         'det.acc_rule'        => 'Regel für alle Buchungen dieses Kontos erstellen (konto:)',
+        'det.iban_rule'       => 'Regel für alle Buchungen mit dieser IBAN erstellen (iban:)',
         'det.memo_rule'       => 'Regel für Buchungen mit dieser Bemerkung erstellen (memo:)',
         'tbl.side'            => 'Art',
         'tbl.all_sides'       => 'Ausgaben und Einnahmen',
@@ -1804,6 +1816,7 @@ function textsEn(): array
         'det.none'            => 'No details – please recalculate.',
         'det.loading'         => 'Loading details …',
         'det.acc_rule'        => 'Create a rule for all bookings of this account (konto:)',
+        'det.iban_rule'       => 'Create a rule for all bookings with this IBAN (iban:)',
         'det.memo_rule'       => 'Create a rule for bookings with this memo (memo:)',
         'tbl.side'            => 'Kind',
         'tbl.all_sides'       => 'expenses and revenues',
@@ -2278,6 +2291,7 @@ td.text { min-width: 16ch; max-width: 46ch; overflow-wrap: break-word; }
 .badge:empty { display: none; }
 a.ruleref { color: var(--accent, #2563eb); text-decoration: underline dotted; text-underline-offset: 3px; }
 a.ruleref:hover { text-decoration-style: solid; }
+a.ruleref.iban { font-variant-numeric: tabular-nums; white-space: nowrap; }
 tr.changed td { background: color-mix(in srgb, var(--warn-soft) 70%, transparent); }
 .tabletools { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; margin-bottom: .6rem; }
 .tabletools input[type=search] { flex: 1 1 260px; }
@@ -3116,7 +3130,7 @@ const payeeGrid = new Grid('payees', [
   {key: 'source', label: t('col.source'), text: r => srcLabel(r.source), render: r => srcCell(r.source)},
   {key: 'transactions', label: t('col.count'), num: true, text: r => n(r.transactions), sortv: r => r.transactions},
   {key: 'amount', label: t('col.amount'), num: true, cls: 'nowrap'},
-  {key: 'iban', label: 'IBAN', cls: 'nowrap'},
+  {key: 'iban', label: 'IBAN', cls: 'nowrap', render: r => ibanCell(r.iban, r.payee, r.side)},
   {key: 'period', label: t('col.period'), cls: 'nowrap', text: r => (r.first === r.last ? r.first : `${r.first} – ${r.last}`), sortv: r => r.last},
   {key: 'categories', label: t('col.categories'), render: r => ex(r.categories)},
   {key: 'booking_texts', label: t('col.examples'), render: r => ex(r.booking_texts)},
@@ -3130,7 +3144,7 @@ const mapGrid = new Grid('map', [
   {key: 'transactions', label: t('col.count'), num: true, text: r => n(r.transactions), sortv: r => r.transactions},
   {key: 'payee', label: t('col.payee'), cls: 'text'},
   {key: 'source', label: t('col.source'), text: r => srcLabel(r.source), render: r => srcCell(r.source)},
-  {key: 'iban', label: 'IBAN', cls: 'nowrap'},
+  {key: 'iban', label: 'IBAN', cls: 'nowrap', render: r => ibanCell(r.iban, r.payee, r.side)},
   {key: 'categories', label: t('col.categories'), render: r => ex(r.categories)},
   {key: '_act', label: t('asst.open_title'), nosort: true, cls: 'act', render: r => actBtn(() => openAssistant(fromPayee(r.payee, r.booking_text)))},
 ], {sort: 'transactions', filter: r => (!S.mapPayee || (r.payee === S.mapPayee.name && r.side === S.mapPayee.side)) && (!$('#map-side').value || r.side === $('#map-side').value) && (!$('#map-src').value || srcKind(r.source) === $('#map-src').value)});
@@ -3208,6 +3222,7 @@ function detailBox(text, side, det) {
     if (x.num) meta.push(el('span', {class: 'muted'}, '#' + x.num));
     meta.push(el('b', {}, x.desc));
     if (x.splits.length > 2) meta.push(el('span', {class: 'badge'}, t('det.split', {n: x.splits.length})));
+    for (const ib of x.ibans || []) meta.push(ibanLink(ib, d.payee, side, true));
     out.push(el('div', {class: 'tip-tx'}, el('div', {class: 'tip-meta'}, meta),
       x.notes ? el('div', {class: 'muted small'}, x.notes) : null,
       el('table', {}, el('tbody', {}, x.splits.map(sp => el('tr', {class: /^(Aufwendungen|Erträge|Expenses?|Income)\b/i.test(sp.account) ? 'hit' : ''},
@@ -3216,6 +3231,15 @@ function detailBox(text, side, det) {
   if (d.n > d.tx.length) out.push(el('div', {class: 'muted small'}, t('det.more', {n: n(d.n - d.tx.length)})));
   return out;
 }
+/** IBAN as a link that opens "Regel erstellen" with an iban: rule (limited to the side) */
+function ibanLink(iban, payee, side, inTip = false) {
+  const pretty = iban.replace(/(.{4})/g, '$1 ').trim();
+  return el('a', {href: '#', class: 'ruleref iban', title: t('det.iban_rule'), onclick: e => {
+    e.preventDefault(); e.stopPropagation(); if (inTip) hideTip();
+    openAssistant({query: '', mode: 'words', target: payee && !/^\(.*\)$/.test(payee) ? payee : '', rule: (side === 'revenue' ? 'einnahme:' : 'ausgabe:') + 'iban:' + iban});
+  }}, pretty);
+}
+const ibanCell = (v, payee, side) => el('span', {}, String(v || '').split(/\s+/).filter(Boolean).flatMap((ib, i) => (i ? [' ', ibanLink(ib, payee, side)] : [ibanLink(ib, payee, side)])));
 /** assistant start values for a "konto:" rule on a GnuCash account (limited to the side) */
 function fromAccount(path, side) {
   const esc = path.replace(/[\\.+*?\[\]^$(){}|\/]/g, '\\$&');
