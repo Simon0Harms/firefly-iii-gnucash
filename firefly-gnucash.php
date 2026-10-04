@@ -1140,6 +1140,8 @@ final class PayeeRules
         #   memo:/regex/        any split memo of the transaction
         #   konto:/regex/       any GnuCash account of the transaction (full path), e.g. the
         #                       cash or card account it was paid from
+        #   auto:/regex/        the AUTOMATIC counterparty name (only bookings no other rule
+        #                       catches); blocks or renames it, e.g.  auto:/paypal/i => -
         # Put "ausgabe:" (expense) or "einnahme:" (revenue) in front to limit a rule to
         # withdrawals or deposits, e.g.  ausgabe:Platinum  or  einnahme:category:/^Erträge/
         # "&&" joins conditions that must all match:  /Abrechnung/i && konto:/:Bankgebühren/
@@ -1195,7 +1197,7 @@ final class PayeeRules
                     $side = $cs;
                     $c    = trim($m[2]);
                 }
-                if (1 === preg_match('/^(desc|iban|category|memo|konto|account):(.*)$/s', $c, $m)) {
+                if (1 === preg_match('/^(desc|iban|category|memo|konto|account|auto):(.*)$/s', $c, $m)) {
                     $field = 'account' === $m[1] ? 'konto' : $m[1];
                     $c     = trim($m[2]);
                 }
@@ -1218,6 +1220,10 @@ final class PayeeRules
                     $text = Util::lower($c);
                 }
                 $conds[] = ['field' => $field, 'regex' => $regex, 'text' => $text];
+            }
+            $autoConds = array_filter($conds, static fn ($c) => 'auto' === $c['field']);
+            if ([] !== $autoConds && count($autoConds) !== count($conds)) {
+                throw new UserError(sprintf('%s:%d: "auto:" cannot be combined with other conditions', $file, $no + 1));
             }
             $r->rules[] = ['line' => $no + 1, 'side' => $side, 'field' => $conds[0]['field'], 'conds' => $conds, 'payee' => $payee];
         }
@@ -1279,7 +1285,7 @@ final class PayeeRules
     public function match(string $description, array $ibans, string $category, array $memos, string $side = '', array $accounts = []): ?array
     {
         foreach ($this->rules as $rule) {
-            if ('' !== $rule['side'] && $rule['side'] !== $side) {
+            if (('' !== $rule['side'] && $rule['side'] !== $side) || 'auto' === $rule['field']) {
                 continue;
             }
             $groups = null;                                  // regex groups of the first condition
@@ -1318,6 +1324,34 @@ final class PayeeRules
             $payee = (string) preg_replace_callback('/\$(\d)/', static fn ($m) => $groups[(int) $m[1]] ?? '', $payee);
             $payee = str_replace(['{category}', '{description}'], [$category, $description], $payee);
             $payee = Util::collapse($payee);
+
+            return ['' === $payee ? '-' : $payee, $rule['line']];
+        }
+
+        return null;
+    }
+
+    /**
+     * "auto:" rules: applied to an automatically derived counterparty name.
+     *
+     * @return null|array{0:string, 1:int} [payee or "-", rule line]
+     */
+    public function matchAuto(string $name, string $side = ''): ?array
+    {
+        foreach ($this->rules as $rule) {
+            if ('auto' !== $rule['field'] || ('' !== $rule['side'] && $rule['side'] !== $side)) {
+                continue;
+            }
+            $c = $rule['conds'][0];
+            $g = [];
+            $hit = null !== $c['regex'] ? 1 === preg_match($c['regex'], $name, $g) : str_contains(Util::lower($name), (string) $c['text']);
+            if (!$hit) {
+                continue;
+            }
+            $payee = $rule['payee'];
+            if ('-' !== $payee) {
+                $payee = Util::collapse(str_replace('{name}', $name, (string) preg_replace_callback('/\$(\d)/', static fn ($m) => $g[(int) $m[1]] ?? '', $payee)));
+            }
 
             return ['' === $payee ? '-' : $payee, $rule['line']];
         }
@@ -1707,7 +1741,12 @@ final class PayeeResolver
             $enough = count($comp['tx']) >= $minCount;
             foreach ($comp['keys'] as $key) {
                 $u = &$this->usages[$key];
-                if ($enough) {
+                // "auto:" rules block or rename automatic names ("auto:/paypal/i => -")
+                $block = $enough ? $this->rules->matchAuto($name, $u['side']) : null;
+                if (null !== $block) {
+                    $u['name']   = '-' === $block[0] ? $this->fallbackName($fallback, $u, $u['tx']) : $block[0];
+                    $u['source'] = '-' === $block[0] ? 'rule:fallback' : 'rule:'.$block[1];
+                } elseif ($enough) {
                     $u['name']   = $name;
                     $u['source'] = 'auto';
                 } else {

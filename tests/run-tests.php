@@ -353,6 +353,15 @@ check('and rule: one missing', null === $and->match('Abrechnung 2024', [], '', [
     && null === $and->match('Zinsen', [], '', [], 'expense', ['Aufwendungen:Bankgebühren:Musterbank']));
 check('and rule with side and memo', 'Porto' === ($and->match('Abrechnung Q1', [], '', ['Porto 0,70'], 'expense')[0] ?? null)
     && null === $and->match('Abrechnung Q1', [], '', ['Porto 0,70'], 'revenue'));
+// "auto:" blocks or renames automatic counterparty names; normal match() ignores it
+file_put_contents($rf, "auto:/paypal/i => -\neinnahme:auto:Bäcker => Bäckerei {name}\n");
+$au = FireflyGnuCash\PayeeRules::load($rf);
+check('auto rule', ['-', 1] === $au->matchAuto('PAYPAL EUROPE S.A.R.L.', 'expense') && null === $au->match('PAYPAL EUROPE', [], '', [], 'expense')
+    && 'Bäckerei Bäcker Muster' === ($au->matchAuto('Bäcker Muster', 'revenue')[0] ?? null) && null === $au->matchAuto('Bäcker Muster', 'expense'));
+file_put_contents($rf, "auto:/x/ && /y/ => Z\n");
+$threw = false;
+try { FireflyGnuCash\PayeeRules::load($rf); } catch (Throwable $e) { $threw = true; }
+check('auto rule cannot be combined', $threw);
 // rule assistant: patterns built from typed text (PayeeRules::build) and what they match
 $bt = static function (string $query, string $mode = 'words', bool $nameOnly = false) use ($rf): FireflyGnuCash\PayeeRules {
     file_put_contents($rf, FireflyGnuCash\PayeeRules::build($query, $mode, $nameOnly)." => X\n");

@@ -1070,6 +1070,9 @@ function apiRulePreview(Workspace $w): never
     if (\in_array('konto', $fields, true)) {
         $out['notes'][] = t('asst.note_konto');
     }
+    if (\in_array('auto', $fields, true)) {
+        $out['notes'][] = t('asst.note_auto');
+    }
     $accOf  = [];
     $memoOf = [];
     if (([] !== array_intersect(['konto', 'memo'], $fields)) && $w->has('details')) {
@@ -1093,9 +1096,14 @@ function apiRulePreview(Workspace $w): never
         $ibans = array_values(array_filter(explode(' ', (string) $r['iban'])));
         $hit   = null;
         $sd    = $side((string) $r['firefly_type']);
-        foreach ($cats as $c) {
-            if (null !== ($hit = $rules->match($text, $ibans, $c, $memoOf[$text.'|'.$sd] ?? [], $sd, $accOf[$text.'|'.$sd] ?? []))) {
-                break;
+        if (\in_array('auto', $fields, true)) {
+            // "auto:" rules only see automatically named counterparties
+            $hit = 'auto' === (string) $r['source'] ? $rules->matchAuto((string) $r['payee'], $sd) : null;
+        } else {
+            foreach ($cats as $c) {
+                if (null !== ($hit = $rules->match($text, $ibans, $c, $memoOf[$text.'|'.$sd] ?? [], $sd, $accOf[$text.'|'.$sd] ?? []))) {
+                    break;
+                }
             }
         }
         $count = (int) $r['transactions'];
@@ -1508,6 +1516,7 @@ function textsDe(): array
         'asst.inserted'   => 'Regel eingefügt – im Reiter „Regeln“ speichern nicht vergessen.',
         'asst.err_newline'=> 'Regel und Gegenkonto dürfen keinen Zeilenumbruch enthalten.',
         'asst.err_arrow'  => 'Das Gegenkonto darf kein „=>“ enthalten.',
+        'asst.note_auto'     => 'auto: prüft nur automatisch gebildete Gegenkonten (Herkunft „automatisch“), nicht den Buchungstext. „-“ als Gegenkonto blockiert den Namen (Fallback).',
         'asst.note_konto'    => 'konto: prüft alle GnuCash-Konten der Buchung, z. B. das Bargeld- oder Kartenkonto, von dem bezahlt wurde.',
         'asst.note_category' => 'Bei category:-Regeln ist die Vorschau ungefähr: ein Buchungstext zählt, wenn eine seiner Kategorien passt.',
         'asst.open'       => 'Regel …',
@@ -1870,6 +1879,7 @@ function textsEn(): array
         'asst.inserted'   => 'Rule inserted – remember to save it in the “Rules” tab.',
         'asst.err_newline'=> 'Rule and counterparty must not contain a line break.',
         'asst.err_arrow'  => 'The counterparty must not contain “=>”.',
+        'asst.note_auto'     => 'auto: only checks automatically derived counterparties (source "automatic"), not the booking text. "-" as counterparty blocks the name (fallback).',
         'asst.note_konto'    => 'konto: checks all GnuCash accounts of the transaction, e.g. the cash or card account it was paid from.',
         'asst.note_category' => 'For category: rules the preview is approximate: a booking text counts when one of its categories matches.',
         'asst.open'       => 'Rule …',

@@ -191,6 +191,7 @@ GnuCash has none. The counterparty is derived from the booking text:
    einnahme:/Erstattung/i                    => Erstattungen
    konto:/:Kantine$/                         => Kantine
    /Abrechnung/i && konto:/:Bankgebühren/    => Bank
+   auto:/paypal/i                            => -
    ```
    Example – Amazon per country (tested with a real book):
    ```
@@ -209,7 +210,9 @@ GnuCash has none. The counterparty is derived from the booking text:
 
    Patterns: `/regex/flags`, plain text (case-insensitive substring), `iban:`, `category:`,
    `memo:`, `konto:` (any GnuCash account of the transaction, full path – e.g. the cash or card
-   account it was paid from). A leading `ausgabe:` (or `expense:`) / `einnahme:` (or `revenue:`) limits a rule to
+   account it was paid from). `auto:` checks the automatically derived counterparty name instead
+   of the booking text (only bookings no other rule catches) and blocks (`=> -`, fallback) or
+   renames it (`{name}` = the automatic name); it cannot be combined with `&&`. A leading `ausgabe:` (or `expense:`) / `einnahme:` (or `revenue:`) limits a rule to
    withdrawals / deposits and can be combined with the others (`ausgabe:iban:DE…`,
    `einnahme:category:/^Erträge/`). ` && ` joins conditions that must all match:
    `/Abrechnung/i && konto:/:Bankgebühren:Musterbank$/ => Musterbank` (`$1…$9` come from the first
