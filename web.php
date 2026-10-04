@@ -34,12 +34,13 @@ const FILES = [
     'summary'     => 'summary.json',
     'importlog'   => 'book.import-log.jsonl',
     'export'      => 'export.gnucash',
+    'rulesreport' => 'rules-report.json',
 ];
 
-const JOB_TYPES = ['plan', 'dryrun', 'import', 'export', 'compare', 'purge-preview', 'purge'];
+const JOB_TYPES = ['plan', 'dryrun', 'import', 'export', 'compare', 'purge-preview', 'purge', 'rules-preview', 'rules'];
 
 /** Jobs that talk to Firefly and need URL + token. */
-const FIREFLY_JOBS = ['dryrun', 'import', 'export', 'purge-preview', 'purge'];
+const FIREFLY_JOBS = ['dryrun', 'import', 'export', 'purge-preview', 'purge', 'rules'];
 
 final class WebError extends \RuntimeException
 {
@@ -807,6 +808,7 @@ function main(): void
             'status'      => apiStatus($w),
             'table'       => apiTable($w),
             'details'     => apiDetails($w),
+            'rulesreport' => json(['ok' => true, 'report' => $w->has('rulesreport') ? json_decode((string) file_get_contents($w->file('rulesreport')), true) : null]),
             'suggestions' => json(['ok' => true, 'items' => $w->has('suggestions') ? readSuggestions($w->file('suggestions')) : []]),
             'text'        => apiText($w),
             'rulepreview' => apiRulePreview($w),
@@ -980,7 +982,7 @@ function apiUpload(Workspace $w): never
     }
     $w->ensure();
     $keep = '1' === (string) ($_POST['keep'] ?? '0');
-    $drop = ['payees', 'map', 'details', 'suggestions', 'summary', 'importlog', 'export'];
+    $drop = ['payees', 'map', 'details', 'suggestions', 'summary', 'importlog', 'export', 'rulesreport'];
     if (!$keep) {
         $drop[] = 'config';
         $drop[] = 'rules';
@@ -1234,7 +1236,7 @@ function apiRun(Workspace $w): never
     if (!\in_array($type, JOB_TYPES, true)) {
         throw new WebError('Unknown job.', 404);
     }
-    if (\in_array($type, ['plan', 'dryrun', 'import', 'compare'], true) && !$w->has('book')) {
+    if (\in_array($type, ['plan', 'dryrun', 'import', 'compare', 'rules-preview', 'rules'], true) && !$w->has('book')) {
         throw new WebError(t('err.no_book'));
     }
     $env  = [];
@@ -1308,6 +1310,26 @@ function apiRun(Workspace $w): never
                 $meta['accounts'] = true;
             }
             $args = array_merge(['purge'], $args, ['purge' === $type ? '--yes' : '--dry-run']);
+            break;
+        case 'rules-preview':
+        case 'rules':
+            // the preview needs no Firefly connection: it only translates and checks against the book
+            @unlink($w->file('rulesreport'));
+            $args = array_merge(['firefly-rules', $w->file('book')], $args, commonArgs(), ['--report-json='.$w->file('rulesreport'), 'rules' === $type ? '--yes' : '--dry-run']);
+            $group = trim((string) ($o['group'] ?? ''));
+            if ('' !== $group) {
+                if (mb_strlen($group) > 100 || 1 === preg_match('/[\x00-\x1f]/', $group)) {
+                    throw new WebError(t('fr.err_group'));
+                }
+                $args[]        = '--group='.$group;
+                $meta['group'] = $group;
+            }
+            foreach (['approx' => 'approx', 'keep_conflicts' => 'keep-conflicts'] as $k => $opt) {
+                if (!empty($o[$k])) {
+                    $args[]   = '--'.$opt;
+                    $meta[$k] = true;
+                }
+            }
             break;
     }
     Job::start($w, $type, $args, $env, $meta);
@@ -1669,6 +1691,82 @@ function textsDe(): array
         'exp.by_year'     => 'auch pro Jahr',
         'exp.info'        => 'Letzter Export: {time}, {size}',
 
+        'fr.title'        => 'Regeln nach Firefly übertragen',
+        'fr.help'         => 'Legt deine Gegenkonto-Regeln als Firefly-Regeln an – für neue Buchungen, die direkt in Firefly landen (z. B. über den Data Importer). Firefly-Regeln vergleichen nur feste Texte, IBANs, Kategorien und Konten: Regeln mit Platzhaltern (\\d, […], .) oder $1/{category} bleiben hier. Jede Buchung deines Buchs wird geprüft; eine Firefly-Regel, die ein anderes Gegenkonto setzen würde als der Import, wird ausgelassen. Ein zweiter Lauf ersetzt die Regeln der Gruppe.',
+        'fr.group'        => 'Regelgruppe in Firefly',
+        'fr.approx'       => 'Auch angenäherte Regeln übertragen',
+        'fr.approx_help'  => '\\b (Wortgrenze) wird weggelassen, \\s+ wird ein Leerzeichen – die Firefly-Regel trifft dann etwas mehr oder weniger.',
+        'fr.keep'         => 'Regeln mit Abweichungen trotzdem übertragen',
+        'fr.keep_help'    => 'Sonst werden Regeln ausgelassen, die Buchungen deines Buchs ein anderes Gegenkonto geben würden (meist weil eine frühere Regel nicht übertragbar ist).',
+        'fr.preview'      => 'Vorschau',
+        'fr.run'          => 'Übertragen …',
+        'fr.err_group'    => 'Ungültiger Name der Regelgruppe.',
+        'fr.confirm_title' => 'Regeln nach Firefly übertragen?',
+        'fr.confirm_body'  => 'Die Regelgruppe „{group}“ in {url} wird angelegt oder ihre bisherigen Regeln werden ersetzt.',
+        'fr.confirm_count' => 'Laut letzter Vorschau: {n} Firefly-Regeln.',
+        'fr.confirm_note'  => 'Die Regeln wirken auf neue Buchungen. Bereits importierte Buchungen ändern sie nicht (in Firefly kann man eine Regelgruppe aber auf vorhandene Buchungen anwenden).',
+        'fr.sum_preview'  => 'Vorschau vom {time}: {rules} von {total} Regeln übertragbar → {specs} Firefly-Regeln in der Gruppe „{group}“.',
+        'fr.sum_done'     => 'Übertragen am {time}: {created} Firefly-Regeln in der Gruppe „{group}“ ({replaced} alte ersetzt).',
+        'fr.sim_title'    => 'Geprüft gegen dein Buch ({n} Buchungen mit Gegenkonto):',
+        'fr.sim_same'     => '{n} bekämen in Firefly dasselbe Gegenkonto wie beim Import',
+        'fr.sim_other'    => '{n} bekämen ein anderes Gegenkonto',
+        'fr.sim_missing'  => '{n} ohne Firefly-Regel, weil ihre Regel nicht übertragen wird',
+        'fr.sim_free'     => '{n} ohne Regel (automatischer Name oder Sammelkonto)',
+        'fr.col_line'     => 'Zeile',
+        'fr.col_rule'     => 'Regel',
+        'fr.col_result'   => 'Ergebnis',
+        'fr.st.ok'        => '{n} Firefly-Regel(n)',
+        'fr.st.approx'    => '{n} Firefly-Regel(n), angenähert',
+        'fr.st.approx_skipped' => 'nur angenähert möglich',
+        'fr.st.skipped'   => 'nicht übertragbar',
+        'fr.st.conflict'  => 'ausgelassen',
+        'fr.hits'         => 'trifft {n} Buchungen',
+        'fr.hits.one'     => 'trifft 1 Buchung',
+        'fr.relies'       => '{n} Buchungen haben ihr Gegenkonto von dieser Regel',
+        'fr.relies.one'   => '1 Buchung hat ihr Gegenkonto von dieser Regel',
+        'fr.conflict'     => '{n} Buchungen bekämen ein anderes Gegenkonto: {against}',
+        'fr.against_line' => '{n} von Zeile {line}',
+        'fr.against_auto' => '{n} mit automatischem Namen',
+        'fr.against_fallback' => '{n} aus dem Sammelkonto',
+        'fr.r.auto'       => '„auto:“-Regeln gibt es in Firefly nicht',
+        'fr.r.memo'       => 'Firefly-Regeln können keine Split-Memos prüfen',
+        'fr.r.placeholder' => 'Gegenkonto mit Platzhalter ({detail}) – Firefly setzt nur feste Namen',
+        'fr.r.fallback_placeholder' => 'das Sammelkonto „{detail}“ enthält einen Platzhalter',
+        'fr.r.expression' => 'Name beginnt mit „=“ (in Firefly ein Ausdruck)',
+        'fr.r.regex'      => 'regulärer Ausdruck mit {detail} – Firefly-Regeln kennen keine Muster',
+        'fr.r.flags'      => 'Regex-Option /{detail}',
+        'fr.r.empty'      => 'das Muster passt auf jeden Text',
+        'fr.r.variants'   => 'zu viele Varianten ({detail})',
+        'fr.r.konto_none' => '„konto:“ passt auf kein Konto, das es in Firefly gibt',
+        'fr.r.quote'      => 'Text enthält " oder \\',
+        'fr.r.too_long'   => 'Text länger als 1024 Zeichen',
+        'fr.a.b'          => '\\b weggelassen',
+        'fr.a.ws'         => '\\s+ / \\s* als ein / kein Leerzeichen',
+        'fr.a.case'       => 'ohne /i – Firefly ignoriert Groß-/Kleinschreibung',
+        'fr.a.case_is'    => '^…$ mit /i – Firefly vergleicht „ist“ evtl. mit Groß-/Kleinschreibung',
+        'fr.a.trim'       => 'Leerzeichen am Rand entfernt',
+        'fr.a.like'       => '% oder _ wirken in Firefly als Platzhalter',
+        'fr.a.konto_partial' => 'einige Konten gibt es in Firefly nicht',
+        'fr.specs'        => 'Firefly-Regeln ({n})',
+        'fr.examples'     => 'Abweichungen ({n})',
+        'fr.ex'           => '{count}× „{desc}“: Import „{ours}“, Firefly „{firefly}“ (Zeile {line})',
+        'fr.tr.transaction_type.withdrawal' => 'Ausgabe',
+        'fr.tr.transaction_type.deposit'    => 'Einnahme',
+        'fr.tr.description_contains' => 'Beschreibung enthält',
+        'fr.tr.description_starts'   => 'Beschreibung beginnt mit',
+        'fr.tr.description_ends'     => 'Beschreibung endet mit',
+        'fr.tr.description_is'       => 'Beschreibung ist',
+        'fr.tr.category_contains'    => 'Kategorie enthält',
+        'fr.tr.category_starts'      => 'Kategorie beginnt mit',
+        'fr.tr.category_ends'        => 'Kategorie endet mit',
+        'fr.tr.category_is'          => 'Kategorie ist',
+        'fr.tr.account_is'           => 'Konto ist',
+        'fr.tr.destination_account_nr_is' => 'IBAN des Ausgabenkontos ist',
+        'fr.tr.source_account_nr_is'      => 'IBAN des Einnahmenkontos ist',
+        'fr.tr.not'                  => 'nicht',
+        'fr.tr.set'                  => 'Gegenkonto',
+        'job.rules-preview' => 'Vorschau Firefly-Regeln',
+        'job.rules'         => 'Firefly-Regeln übertragen',
         'pur.title'   => 'Importierte Daten löschen',
         'pur.help'    => 'Für Testimporte: löscht alle Buchungen mit dem Import-Tag in Firefly. Das lässt sich nicht rückgängig machen.',
         'pur.tag'     => 'Import-Tag',
@@ -2037,6 +2135,82 @@ function textsEn(): array
         'exp.by_year'     => 'also per year',
         'exp.info'        => 'Last export: {time}, {size}',
 
+        'fr.title'        => 'Transfer rules to Firefly',
+        'fr.help'         => 'Creates your counterparty rules as Firefly rules – for new transactions that land in Firefly directly (e.g. via the Data Importer). Firefly rules compare fixed texts, IBANs, categories and accounts only: rules with wildcards (\\d, […], .) or $1/{category} stay here. Every booking of your book is checked; a Firefly rule that would set another counterparty than the import is left out. A second run replaces the rules of the group.',
+        'fr.group'        => 'Rule group in Firefly',
+        'fr.approx'       => 'Also transfer approximate rules',
+        'fr.approx_help'  => '\\b (word boundary) is dropped, \\s+ becomes one space – the Firefly rule then matches a bit more or less.',
+        'fr.keep'         => 'Transfer rules with differences anyway',
+        'fr.keep_help'    => 'Otherwise rules are left out that would give bookings of your book another counterparty (usually because an earlier rule cannot be transferred).',
+        'fr.preview'      => 'Preview',
+        'fr.run'          => 'Transfer …',
+        'fr.err_group'    => 'Invalid rule group name.',
+        'fr.confirm_title' => 'Transfer rules to Firefly?',
+        'fr.confirm_body'  => 'The rule group "{group}" in {url} is created or its current rules are replaced.',
+        'fr.confirm_count' => 'Last preview: {n} Firefly rules.',
+        'fr.confirm_note'  => 'The rules act on new transactions. They do not change imported ones (in Firefly a rule group can be applied to existing transactions, though).',
+        'fr.sum_preview'  => 'Preview of {time}: {rules} of {total} rules transferable → {specs} Firefly rules in group "{group}".',
+        'fr.sum_done'     => 'Transferred {time}: {created} Firefly rules in group "{group}" ({replaced} old ones replaced).',
+        'fr.sim_title'    => 'Checked against your book ({n} bookings with a counterparty):',
+        'fr.sim_same'     => '{n} would get the same counterparty in Firefly as in the import',
+        'fr.sim_other'    => '{n} would get another counterparty',
+        'fr.sim_missing'  => '{n} without Firefly rule because their rule is not transferred',
+        'fr.sim_free'     => '{n} without rule (automatic name or fallback)',
+        'fr.col_line'     => 'Line',
+        'fr.col_rule'     => 'Rule',
+        'fr.col_result'   => 'Result',
+        'fr.st.ok'        => '{n} Firefly rule(s)',
+        'fr.st.approx'    => '{n} Firefly rule(s), approximated',
+        'fr.st.approx_skipped' => 'only approximately possible',
+        'fr.st.skipped'   => 'not transferable',
+        'fr.st.conflict'  => 'left out',
+        'fr.hits'         => 'matches {n} bookings',
+        'fr.hits.one'     => 'matches 1 booking',
+        'fr.relies'       => '{n} bookings get their counterparty from this rule',
+        'fr.relies.one'   => '1 booking gets its counterparty from this rule',
+        'fr.conflict'     => '{n} bookings would get another counterparty: {against}',
+        'fr.against_line' => '{n} from line {line}',
+        'fr.against_auto' => '{n} with an automatic name',
+        'fr.against_fallback' => '{n} from the fallback',
+        'fr.r.auto'       => '"auto:" rules do not exist in Firefly',
+        'fr.r.memo'       => 'Firefly rules cannot check split memos',
+        'fr.r.placeholder' => 'counterparty with placeholder ({detail}) – Firefly sets fixed names only',
+        'fr.r.fallback_placeholder' => 'the fallback "{detail}" contains a placeholder',
+        'fr.r.expression' => 'name starts with "=" (an expression in Firefly)',
+        'fr.r.regex'      => 'regular expression with {detail} – Firefly rules have no patterns',
+        'fr.r.flags'      => 'regex option /{detail}',
+        'fr.r.empty'      => 'the pattern matches every text',
+        'fr.r.variants'   => 'too many variants ({detail})',
+        'fr.r.konto_none' => '"konto:" matches no account that exists in Firefly',
+        'fr.r.quote'      => 'text contains " or \\',
+        'fr.r.too_long'   => 'text longer than 1024 characters',
+        'fr.a.b'          => '\\b dropped',
+        'fr.a.ws'         => '\\s+ / \\s* as one / no space',
+        'fr.a.case'       => 'no /i – Firefly ignores upper/lower case',
+        'fr.a.case_is'    => '^…$ with /i – Firefly may compare "is" case-sensitively',
+        'fr.a.trim'       => 'spaces at the edges removed',
+        'fr.a.like'       => '% or _ act as wildcards in Firefly',
+        'fr.a.konto_partial' => 'some accounts do not exist in Firefly',
+        'fr.specs'        => 'Firefly rules ({n})',
+        'fr.examples'     => 'Differences ({n})',
+        'fr.ex'           => '{count}× "{desc}": import "{ours}", Firefly "{firefly}" (line {line})',
+        'fr.tr.transaction_type.withdrawal' => 'withdrawal',
+        'fr.tr.transaction_type.deposit'    => 'deposit',
+        'fr.tr.description_contains' => 'description contains',
+        'fr.tr.description_starts'   => 'description starts with',
+        'fr.tr.description_ends'     => 'description ends with',
+        'fr.tr.description_is'       => 'description is',
+        'fr.tr.category_contains'    => 'category contains',
+        'fr.tr.category_starts'      => 'category starts with',
+        'fr.tr.category_ends'        => 'category ends with',
+        'fr.tr.category_is'          => 'category is',
+        'fr.tr.account_is'           => 'account is',
+        'fr.tr.destination_account_nr_is' => 'IBAN of the expense account is',
+        'fr.tr.source_account_nr_is'      => 'IBAN of the revenue account is',
+        'fr.tr.not'                  => 'not',
+        'fr.tr.set'                  => 'counterparty',
+        'job.rules-preview' => 'Firefly rules preview',
+        'job.rules'         => 'Transfer Firefly rules',
         'pur.title'   => 'Delete imported data',
         'pur.help'    => 'For test imports: deletes all transactions with the import tag in Firefly. This cannot be undone.',
         'pur.tag'     => 'Import tag',
@@ -2291,6 +2465,11 @@ td.text { min-width: 16ch; max-width: 46ch; overflow-wrap: break-word; }
 .badge:empty { display: none; }
 a.ruleref { color: var(--accent, #2563eb); text-decoration: underline dotted; text-underline-offset: 3px; }
 a.ruleref:hover { text-decoration-style: solid; }
+#fr-result table td { vertical-align: top; }
+#fr-result td.code { font-family: var(--mono, ui-monospace, monospace); font-size: 12px; overflow-wrap: anywhere; max-width: 60ch; }
+#fr-result .why { color: var(--muted); font-size: 12px; }
+#fr-result details { margin-top: .6rem; }
+#fr-result ol, #fr-result ul.small { margin: .3rem 0; padding-left: 1.6rem; max-height: 50vh; overflow: auto; overflow-wrap: anywhere; }
 a.ruleref.iban { font-variant-numeric: tabular-nums; white-space: nowrap; }
 tr.changed td { background: color-mix(in srgb, var(--warn-soft) 70%, transparent); }
 .tabletools { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; margin-bottom: .6rem; }
@@ -2666,6 +2845,23 @@ footer.foot a { color: var(--muted); }
           <p class="help" id="exp-info"></p>
         </div>
       </div>
+    </div>
+
+    <div class="mt5 card" id="frules-card">
+      <header><h2><?= $L('fr.title') ?></h2></header>
+      <p class="help"><?= $L('fr.help') ?></p>
+      <div class="fields">
+        <label class="field"><?= $L('fr.group') ?><input type="text" id="fr-group" value="GnuCash-Import" maxlength="100" spellcheck="false"></label>
+      </div>
+      <div class="mt2 stack">
+        <label class="check"><input type="checkbox" id="fr-approx"> <span><?= $L('fr.approx') ?><br><span class="help"><?= $L('fr.approx_help') ?></span></span></label>
+        <label class="check"><input type="checkbox" id="fr-keep"> <span><?= $L('fr.keep') ?><br><span class="help"><?= $L('fr.keep_help') ?></span></span></label>
+      </div>
+      <div class="mt4 row end">
+        <button type="button" class="btn" id="fr-preview"><?= $L('fr.preview') ?></button>
+        <button type="button" class="btn primary" id="fr-run"><?= $L('fr.run') ?></button>
+      </div>
+      <div class="mt2 frres" id="fr-result" hidden></div>
     </div>
 
     <div class="mt5 card danger" id="purge-card">
@@ -3681,7 +3877,7 @@ $('#ff-test').addEventListener('click', async () => {
 
 async function runJob(type, options = {}) {
   if (S.running) { toast(t('err.job_running'), true); return false; }
-  const firefly = ['dryrun', 'import', 'export', 'purge-preview', 'purge'].includes(type);
+  const firefly = ['dryrun', 'import', 'export', 'purge-preview', 'purge', 'rules'].includes(type);
   const c = firefly ? needConn() : {};
   if (firefly && !c) return false;
   try {
@@ -3719,6 +3915,72 @@ $('#pur-run').addEventListener('click', async () => {
   if (await ask({title: t('pur.confirm_title'), body, ok: t('pur.run'), danger: true, word: t('pur.word')})) runJob('purge', o);
 });
 
+// ------------------------------------------------------------------ rules -> Firefly
+const frOptions = () => ({group: $('#fr-group').value.trim(), approx: $('#fr-approx').checked, keep_conflicts: $('#fr-keep').checked});
+$('#fr-preview').addEventListener('click', () => runJob('rules-preview', frOptions()));
+$('#fr-run').addEventListener('click', async () => {
+  const c = needConn(); if (!c) return;
+  const o = frOptions();
+  const body = [t('fr.confirm_body', {group: o.group || 'GnuCash-Import', url: c.url})];
+  if (S.fr && !S.fr.firefly) body.push(t('fr.confirm_count', {n: n(S.fr.specs.length)}));
+  body.push(t('fr.confirm_note'));
+  if (await ask({title: t('fr.confirm_title'), body, ok: t('fr.run').replace(/\s*…$/, '')})) runJob('rules', o);
+});
+async function loadFR() {
+  try { S.fr = (await api('rulesreport')).report; } catch (e) { S.fr = null; toast(e.message, true); }
+  renderFR();
+}
+const frReason = r => (r.status === 'skipped' ? t('fr.r.' + r.reason, {detail: r.detail})
+  : r.status === 'conflict' ? t('fr.conflict', {n: n(+r.detail), against: Object.entries(r.against || {}).map(([k, v]) => /^\d+$/.test(k) ? t('fr.against_line', {n: n(v), line: k}) : t('fr.against_' + k, {n: n(v)})).join(', ')})
+  : (r.approx || []).map(a => t('fr.a.' + a)).join('; '));
+function frTrigger(tr) {
+  if (tr.type === 'transaction_type') return t('fr.tr.transaction_type.' + tr.value);
+  return (tr.prohibited ? t('fr.tr.not') + ' ' : '') + t('fr.tr.' + tr.type) + ' „' + tr.value + '“';
+}
+function renderFR() {
+  const rep = S.fr, box = $('#fr-result');
+  if (!rep) { box.hidden = true; box.replaceChildren(); return; }
+  box.hidden = false;
+  const time = fmtTime(S.st?.files?.rulesreport?.time || 0);
+  const count = {ok: 0, approx: 0, approx_skipped: 0, skipped: 0, conflict: 0};
+  for (const r of rep.rules) count[r.status]++;
+  const sim = rep.sim || {};
+  const kids = [el('p', {}, rep.firefly
+    ? t('fr.sum_done', {time, created: n(rep.firefly.created), replaced: n(rep.firefly.replaced), group: rep.group})
+    : t('fr.sum_preview', {time, rules: n(count.ok + count.approx), total: n(rep.rules.length), specs: n(rep.specs.length), group: rep.group}))];
+  kids.push(el('p', {class: 'small'}, t('fr.sim_title', {n: n(sim.total || 0)})), el('ul', {class: 'facts small'},
+    el('li', {}, t('fr.sim_same', {n: n(sim.same || 0)})),
+    sim.other ? el('li', {class: 'bad'}, t('fr.sim_other', {n: n(sim.other)})) : null,
+    el('li', {}, t('fr.sim_missing', {n: n(sim.missing || 0)})),
+    el('li', {}, t('fr.sim_free', {n: n(sim.free || 0)}))));
+  const rank = {conflict: 0, skipped: 1, approx_skipped: 2, approx: 3, ok: 4};
+  const rows = rep.rules.slice().sort((a, b) => rank[a.status] - rank[b.status] || a.line - b.line);
+  const badge = {ok: 'ok', approx: 'ok', approx_skipped: 'warn', skipped: '', conflict: 'bad'};
+  const tb = el('tbody', {}, rows.map(r => {
+    const facts = [];
+    const why = frReason(r);
+    if (why) facts.push(el('div', {class: 'why'}, why));
+    const hits = sim.lines?.[r.line]?.hits;
+    if (hits && (r.status === 'ok' || r.status === 'approx')) facts.push(el('div', {class: 'why'}, tn('fr.hits', hits, {n: n(hits)})));
+    const relies = sim.missing_lines?.[r.line];
+    if (relies && r.status !== 'ok' && r.status !== 'approx') facts.push(el('div', {class: 'why'}, tn('fr.relies', relies, {n: n(relies)})));
+    return el('tr', {},
+      el('td', {class: 'num'}, el('a', {href: '#', class: 'ruleref', title: t('rules.goto_title'), onclick: e => { e.preventDefault(); gotoRule(r.line); }}, String(r.line))),
+      el('td', {class: 'code'}, r.src),
+      el('td', {}, el('span', {class: 'badge ' + badge[r.status]}, t('fr.st.' + r.status, {n: n(r.firefly)})), ...facts));
+  }));
+  kids.push(el('div', {class: 'tablewrap mt1'}, el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, t('fr.col_line')), el('th', {}, t('fr.col_rule')), el('th', {}, t('fr.col_result')))), tb)));
+  if ((sim.examples || []).length) {
+    kids.push(el('details', {open: true}, el('summary', {}, t('fr.examples', {n: n(sim.examples.length)})),
+      el('ul', {class: 'small'}, sim.examples.map(x => el('li', {}, t('fr.ex', {count: n(x.count), desc: x.desc, ours: x.ours, firefly: x.firefly, line: x.line}))))));
+  }
+  if (rep.specs.length) {
+    kids.push(el('details', {}, el('summary', {}, t('fr.specs', {n: n(rep.specs.length)})),
+      el('ol', {class: 'small'}, rep.specs.map(s => el('li', {}, el('b', {}, s.title), ': ', s.triggers.map(frTrigger).join(' · '), ' → ', t('fr.tr.set'), ' „' + s.action.value + '“')))));
+  }
+  box.replaceChildren(...kids);
+}
+
 function renderFirefly() {
   const st = S.st, sum = st.summary, f = st.files || {};
   const hint = $('#import-hint');
@@ -3729,6 +3991,10 @@ function renderFirefly() {
   $('#imp-dry').disabled = S.running || !canImport;
   $('#imp-run').disabled = S.running || !canImport;
   for (const id of ['#exp-run', '#pur-preview', '#pur-run', '#ff-test']) $(id).disabled = S.running && id !== '#ff-test';
+  $('#fr-preview').disabled = S.running || !st.book;
+  $('#fr-run').disabled = S.running || !st.book;
+  const frTime = f.rulesreport?.time || 0;
+  if (frTime !== S.frTime && !(S.running && st.job?.type?.startsWith('rules'))) { S.frTime = frTime; if (frTime) loadFR(); else { S.fr = null; renderFR(); } }
   const dls = [];
   if (st.logs?.dryrun) dls.push(el('a', {class: 'btn small', href: '?a=dl&what=log-dryrun'}, t('dl.drylog')));
   if (st.logs?.import) dls.push(el('a', {class: 'btn small', href: '?a=dl&what=log-import'}, t('dl.importlog')));

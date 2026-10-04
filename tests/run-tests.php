@@ -362,6 +362,57 @@ file_put_contents($rf, "auto:/x/ && /y/ => Z\n");
 $threw = false;
 try { FireflyGnuCash\PayeeRules::load($rf); } catch (Throwable $e) { $threw = true; }
 check('auto rule cannot be combined', $threw);
+// payee rules -> Firefly rules (firefly-rules)
+$ffr = static function (string $rules, bool $approx = false, string $fallback = '(diverse)') use ($rf): array {
+    file_put_contents($rf, $rules);
+    $acc = ['Aktiva:Kasse' => ['as' => 'asset', 'name' => 'Kasse'], 'Aufwendungen:Kantine' => ['as' => 'category', 'name' => 'Kantine'], 'Handel' => ['as' => 'ignore', 'name' => 'Handel']];
+
+    return (new FireflyGnuCash\FireflyRuleTranslator($acc, $fallback))->translate(FireflyGnuCash\PayeeRules::load($rf), $approx);
+};
+$trig = static fn (array $spec): array => array_map(static fn ($t) => ($t['prohibited'] ? '-' : '').$t['type'].'='.$t['value'], $spec['triggers']);
+$res  = $ffr("REWE => REWE\n");
+check('ffrules: text rule -> withdrawal + deposit', 2 === count($res['specs'])
+    && ['transaction_type=withdrawal', 'description_contains=REWE'] === $trig($res['specs'][0]) && 'set_destination_account' === $res['specs'][0]['action']['type']
+    && ['transaction_type=deposit', 'description_contains=REWE'] === $trig($res['specs'][1]) && 'set_source_account' === $res['specs'][1]['action']['type'], json_encode($res['specs']));
+$res = $ffr("ausgabe:/^LASTSCHRIFT\s+Musterbank$|^Gutschrift Muster/i => Musterbank\n", true);
+check('ffrules: anchors -> is / starts, \s+ approximated', ['ws', 'case_is'] === $res['rules'][0]['approx'] && 2 === count($res['specs'])
+    && ['transaction_type=withdrawal', 'description_is=LASTSCHRIFT Musterbank'] === $trig($res['specs'][0]) && ['transaction_type=withdrawal', 'description_starts=Gutschrift Muster'] === $trig($res['specs'][1]), json_encode($res));
+$res = $ffr("einnahme:/muster\.(de|com)|PAYPAL-?KONTO/i => Muster\n");
+check('ffrules: alternatives and optional character expand exactly', 'ok' === $res['rules'][0]['status']
+    && ['muster.de', 'muster.com', 'PAYPALKONTO', 'PAYPAL-KONTO'] === array_map(static fn ($s) => $s['triggers'][1]['value'], $res['specs']), json_encode($res['specs']));
+$res = $ffr("/^(?!.*(Gutschein|Punkte)).*\bMUSTERSHOP\b/i => Mustershop\n");
+check('ffrules: \b only approximately', 'approx_skipped' === $res['rules'][0]['status'] && ['b'] === $res['rules'][0]['approx'] && [] === $res['specs']);
+$res = $ffr("/^(?!.*(Gutschein|Punkte)).*\bMUSTERSHOP\b/i => Mustershop\n", true);
+check('ffrules: exclusion -> prohibited triggers', 2 === count($res['specs'])
+    && ['transaction_type=withdrawal', 'description_contains=MUSTERSHOP', '-description_contains=Gutschein', '-description_contains=Punkte'] === $trig($res['specs'][0]), json_encode($res['specs']));
+$res = $ffr("/\d{13}/ => A\nmemo:/x/ => B\nauto:/paypal/i => -\n/Kauf bei (\w+)/ => \$1\n/[ab]x/ => C\n/^$/ => D\nX => =Y\n/a/x => E\n");
+check('ffrules: untranslatable rules with reasons', ['regex:\d', 'memo:', 'auto:', 'placeholder:$1', 'regex:[…]', 'empty:', 'expression:', 'flags:x'] === array_map(static fn ($r) => $r['reason'].':'.$r['detail'], $res['rules']) && [] === $res['specs'], json_encode($res['rules']));
+$res = $ffr("/Kauf bei (Muster|Beispiel)/ => \$1\n");
+check('ffrules: placeholder in the counterparty', 'placeholder' === $res['rules'][0]['reason']);
+$res = $ffr("Gebühr => -\n", false, '{category}');
+check('ffrules: fallback with placeholder', 'fallback_placeholder' === $res['rules'][0]['reason']);
+$res = $ffr("Gebühr => -\n");
+check('ffrules: fallback name', '(diverse)' === $res['specs'][0]['action']['value']);
+$res = $ffr("ausgabe:iban:DE89 3704 0044 0532 0130 00 => Stadtwerke\neinnahme:iban:DE89370400440532013000 => Stadtwerke\n");
+check('ffrules: iban -> account number of the counterparty', ['transaction_type=withdrawal', 'destination_account_nr_is=DE89370400440532013000'] === $trig($res['specs'][0])
+    && ['transaction_type=deposit', 'source_account_nr_is=DE89370400440532013000'] === $trig($res['specs'][1]));
+$res = $ffr("ausgabe:Essen && konto:/Kasse|Kantine|Handel/ => Kantine\n");
+check('ffrules: konto -> account_is / category_is per account', 'approx_skipped' === $res['rules'][0]['status'] && ['konto_partial'] === $res['rules'][0]['approx']);
+$res = $ffr("ausgabe:Essen && konto:/Kasse|Kantine|Handel/ => Kantine\n", true);
+check('ffrules: konto alternatives', 2 === count($res['specs']) && ['transaction_type=withdrawal', 'description_contains=Essen', 'account_is=Kasse'] === $trig($res['specs'][0])
+    && ['transaction_type=withdrawal', 'description_contains=Essen', 'category_is=Kantine'] === $trig($res['specs'][1]) && 'GnuCash Z.1: Kantine (Ausgabe 2/2)' === $res['specs'][1]['title'], json_encode($res['specs']));
+$res = $ffr("/ab?c?d?e?f?g?h?/ => X\n");
+check('ffrules: too many variants', 'variants' === $res['rules'][0]['reason']);
+// simulation: a later rule catches what an untranslatable earlier rule handles in the import
+$res   = $ffr("/Muster \d+/ => Muster\nMuster => Allgemein\n");
+$cases = [
+    ['tx' => 'a', 'desc' => 'Muster 12', 'side' => 'expense', 'category' => '', 'accounts' => [], 'ibans' => [], 'name' => 'Muster', 'source' => 'rule:1'],
+    ['tx' => 'b', 'desc' => 'Muster X', 'side' => 'expense', 'category' => '', 'accounts' => [], 'ibans' => [], 'name' => 'Allgemein', 'source' => 'rule:2'],
+    ['tx' => 'c', 'desc' => 'Bäcker', 'side' => 'expense', 'category' => '', 'accounts' => [], 'ibans' => [], 'name' => 'Bäcker', 'source' => 'auto'],
+];
+$sim = FireflyGnuCash\FireflyRuleTranslator::simulate($res['specs'], $cases);
+check('ffrules: simulation finds the conflict', 1 === $sim['same'] && 1 === $sim['other'] && 1 === $sim['free'] && 0 === $sim['missing'] && ['1' => 1] === $sim['lines'][2]['against']
+    && 'Allgemein' === $sim['examples'][0]['firefly'], json_encode($sim));
 // rule assistant: patterns built from typed text (PayeeRules::build) and what they match
 $bt = static function (string $query, string $mode = 'words', bool $nameOnly = false) use ($rf): FireflyGnuCash\PayeeRules {
     file_put_contents($rf, FireflyGnuCash\PayeeRules::build($query, $mode, $nameOnly)." => X\n");

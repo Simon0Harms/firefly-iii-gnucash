@@ -9,6 +9,7 @@
 | `export`  | Writes the Firefly III data as a GnuCash XML book (`.gnucash`, gzip). |
 | `compare` | Compares the account balances of two GnuCash books, e.g. the original and an export after the import. |
 | `purge`   | Deletes what an import created – for test runs. |
+| `firefly-rules` | Creates Firefly III rules from the payee rules, for transactions that later land in Firefly directly. |
 
 `web.php` does the same in the browser (see [Web interface](#web-interface)).
 
@@ -79,7 +80,9 @@ with progress, export and compare, and delete test imports. **Create rule** turn
 (e.g. `DB Hamburg`: words in this order, all words in any order, text begins with / contains it,
 optionally only in the recipient name after the last `;`) into a rule and shows before saving
 which booking texts it catches, which counterparty they have now and get then, and similar texts
-it misses; suggestions and every row of the counterparty tables can be opened there to adjust. Hovering
+it misses; suggestions and every row of the counterparty tables can be opened there to adjust.
+In the Firefly III tab, **Transfer rules to Firefly** runs `firefly-rules` with a preview of the
+translation and the check against the book. Hovering
 a booking text shows its transactions with all splits (GnuCash accounts, amounts, memos, main
 description of split transactions); the table search also finds accounts and split memos, and a
 click on an account in that box opens a `konto:` rule for it. It calls `firefly-gnucash.php` next to it, so both files belong together. Every browser
@@ -302,6 +305,51 @@ balances of all imported accounts are compared with GnuCash. Every transaction i
 second (rules and webhooks are switched off during the import: options `apply_rules`, `fire_webhooks`).
 
 If you change the mapping or rules after an import, `purge --accounts` and import again.
+
+### Payee rules as Firefly rules (`firefly-rules`)
+
+The payee rules only act during the import. For transactions that later reach Firefly directly
+(Data Importer, manual entry), `firefly-rules` creates Firefly III rules from them – in one rule
+group (default `GnuCash-Import`, `--group=...`); a second run replaces the rules of that group.
+
+```bash
+php firefly-gnucash.php firefly-rules meinbuch.gnucash --dry-run          # translation + check only
+php firefly-gnucash.php firefly-rules meinbuch.gnucash --url=... --token-file=...
+```
+
+Firefly rule triggers compare plain texts (description contains / starts / ends / is), IBANs,
+categories and accounts – there are no regular expressions. So the tool translates what can be
+expressed exactly and lists the rest with the reason:
+
+| payee rule | Firefly rule |
+|---|---|
+| `REWE` | description contains `REWE` |
+| `/^LASTSCHRIFT/i`, `/…$/`, `/^…$/` | description starts with / ends with / is |
+| `/amazon\.(fr\|it)/i`, `/PAYPAL-?KONTO/i` | one Firefly rule per variant (`amazon.fr`, `amazon.it`, …) |
+| `/^(?!.*(Gutschein\|Punkte)).*AMAZON/i` | contains `AMAZON`, **not** contains `Gutschein`, `Punkte` |
+| `iban:DE…` | IBAN of the expense account (withdrawal) / revenue account (deposit) is |
+| `category:…`, `konto:…` | category is/contains, account is (accounts and categories as mapped in `import.json`) |
+| `ausgabe:` / `einnahme:`, `&&` | transaction type, all triggers must match |
+| `=> Name`, `=> -` | set destination account (withdrawal) / source account (deposit); `-` = the fallback name |
+| `\d`, `[…]`, `.`, `+`, `{n}`, `$1`, `{category}`, `memo:`, `auto:` | not translatable |
+
+A rule without `ausgabe:`/`einnahme:` becomes two Firefly rules (withdrawal and deposit), because
+Firefly sets the expense account of a withdrawal but the revenue account of a deposit. Every Firefly
+rule is strict and stops processing, so – as here – the first matching rule of the group wins.
+`--approx` also takes rules that only fit approximately: `\b` is dropped (matches a bit more),
+`\s+`/`\s*` become one/no space; `\s` alone is taken as one space.
+
+Then every booking of the book is checked: which counterparty would the Firefly rules set,
+compared with the import? A Firefly rule that would set another one – typically because an earlier
+payee rule could not be translated (`Amazon DE` with `\d` is missing, so `Amazon (Land unbekannt)`
+would catch those bookings) – is left out and reported, unless `--keep-conflicts`.
+
+Notes: Firefly compares "contains/starts/ends" without regard to upper/lower case (with SQLite only
+for letters without umlauts) and "is" exactly; `%` and `_` in a text act as wildcards there.
+`iban:` checks the IBAN of the Firefly counterparty account, not the booking text. `konto:` is
+resolved against today's accounts. Rule actions create missing expense/revenue accounts. The
+rules act on new transactions; the import itself runs without rules (option `apply_rules`), and in
+Firefly a rule group can also be applied to existing transactions.
 
 ## Export: Firefly III → GnuCash
 

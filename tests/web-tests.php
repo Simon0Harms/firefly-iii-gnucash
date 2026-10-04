@@ -205,6 +205,14 @@ $r = api('POST', '?a=run', ['json' => ['type' => 'dryrun', 'url' => 'http://127.
 $st = waitJob('dryrun');
 check('dry run against an unreachable Firefly fails cleanly', true === $r['ok'] && 'failed' === ($st['job']['state'] ?? '') && str_contains((string) $st['job']['log'], 'ERROR'), json_encode($st['job'] ?? null));
 check('token not in the job data', !str_contains(json_encode($st), '"abc"'));
+// rules -> Firefly: the preview needs no connection, the transfer does
+$r = api('POST', '?a=run', ['json' => ['type' => 'rules-preview', 'options' => ['group' => 'Test-Gruppe', 'approx' => true]]]);
+$st = waitJob('rules-preview');
+$rep = api('GET', '?a=rulesreport')['report'] ?? null;
+check('firefly rules preview runs offline', true === $r['ok'] && 'ok' === ($st['job']['state'] ?? '') && str_contains((string) $st['job']['log'], 'Dry run'), json_encode($st['job'] ?? null));
+check('firefly rules report', is_array($rep) && 'Test-Gruppe' === $rep['group'] && true === $rep['approx'] && isset($rep['sim']['total'], $rep['rules'], $rep['specs']), json_encode($rep));
+$r = api('POST', '?a=run', ['json' => ['type' => 'rules', 'url' => 'http://127.0.0.1:9', 'token' => '']]);
+check('firefly rules transfer needs a token', false === $r['ok']);
 $r = api('POST', '?a=connect', ['json' => ['url' => 'http://127.0.0.1:9', 'token' => 'abc']]);
 check('connection test reports the error', false === $r['ok'] && '' !== (string) $r['error']);
 

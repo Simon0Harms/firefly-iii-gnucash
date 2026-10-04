@@ -12,6 +12,7 @@
  *   export  OUT.gnucash         export Firefly III into a GnuCash XML book
  *   compare A.gnucash B.gnucash compare account balances of two GnuCash books
  *   purge                       delete what an import created (for test runs)
+ *   firefly-rules BOOK          create Firefly III rules from the payee rules
  *
  * Requirements: PHP >= 8.1 with curl, xmlreader, dom, zlib, mbstring, bcmath
  * (all present in every Firefly III installation). pdo_sqlite only for SQLite books.
@@ -1123,7 +1124,7 @@ final class ImportConfig
 
 final class PayeeRules
 {
-    /** @var list<array{line:int, side:string, field:string, conds:list<array{field:string, regex:?string, text:?string}>, payee:string}> */
+    /** @var list<array{line:int, side:string, field:string, conds:list<array{field:string, regex:?string, text:?string, raw:string}>, payee:string, src:string}> */
     public array $rules = [];
 
     public const TEMPLATE = <<<'TXT'
@@ -1219,13 +1220,13 @@ final class PayeeRules
                 } else {
                     $text = Util::lower($c);
                 }
-                $conds[] = ['field' => $field, 'regex' => $regex, 'text' => $text];
+                $conds[] = ['field' => $field, 'regex' => $regex, 'text' => $text, 'raw' => $c];
             }
             $autoConds = array_filter($conds, static fn ($c) => 'auto' === $c['field']);
             if ([] !== $autoConds && count($autoConds) !== count($conds)) {
                 throw new UserError(sprintf('%s:%d: "auto:" cannot be combined with other conditions', $file, $no + 1));
             }
-            $r->rules[] = ['line' => $no + 1, 'side' => $side, 'field' => $conds[0]['field'], 'conds' => $conds, 'payee' => $payee];
+            $r->rules[] = ['line' => $no + 1, 'side' => $side, 'field' => $conds[0]['field'], 'conds' => $conds, 'payee' => $payee, 'src' => $line];
         }
 
         return $r;
@@ -1357,6 +1358,629 @@ final class PayeeRules
         }
 
         return null;
+    }
+}
+
+// =====================================================================================
+// Payee rules -> Firefly III rules ("firefly-rules"). Firefly rule triggers compare plain
+// texts (contains / starts / ends / is, case-insensitive except "is"), IBANs, categories and
+// accounts - no regular expressions. Simple expressions are expanded into the plain texts
+// they stand for: /^Foo(bar|baz)?$/i -> "Foo", "Foobar", "Foobaz". Anything with wildcards
+// or character classes stays in this tool. One payee rule can become several Firefly rules:
+// one per side (withdrawal: set_destination_account, deposit: set_source_account) and one
+// per alternative (Firefly rules can not combine "any of" with "all of").
+// =====================================================================================
+
+/** A payee rule (or one condition of it) Firefly can not express. */
+final class RuleTranslationError extends \RuntimeException
+{
+    public function __construct(public string $reason, public string $detail = '')
+    {
+        parent::__construct('' === $detail ? $reason : $reason.' '.$detail);
+    }
+}
+
+/**
+ * The plain texts a simple regular expression stands for. Supported: literal characters,
+ * escaped punctuation, alternatives and groups ((a|b), (?:a|b)), "?" after a character or
+ * group, \s (one space), anchors ^ and $ at the ends, ".*" at the ends, and a leading
+ * ^(?!.*(a|b)) exclusion. Approximations (recorded in $approx): \b is dropped, \s+ and \s*
+ * become one or no space. Everything else throws RuleTranslationError('regex', construct).
+ */
+final class RegexLiterals
+{
+    public const MAX = 64;
+
+    /** @var array<string, true> approximation codes: b, ws */
+    public array $approx = [];
+
+    /** @var list<string> */
+    private array $c;
+    private int $i = 0;
+
+    public function __construct(string $body)
+    {
+        $this->c = mb_str_split($body, 1, 'UTF-8');
+    }
+
+    /** @return list<array{start:bool, end:bool, variants:list<string>, not:list<string>}> one entry per top-level alternative */
+    public function parse(): array
+    {
+        $alts = [];
+        while (true) {
+            $alts[] = $this->alternative();
+            if ('|' !== $this->peek()) {
+                break;
+            }
+            ++$this->i;
+        }
+        if (null !== $this->peek()) {
+            throw new RuleTranslationError('regex', (string) $this->peek());   // unbalanced ")"
+        }
+
+        return $alts;
+    }
+
+    private function peek(int $offset = 0): ?string
+    {
+        return $this->c[$this->i + $offset] ?? null;
+    }
+
+    private function alternative(): array
+    {
+        $start = false;
+        $not   = [];
+        if ('^' === $this->peek()) {
+            ++$this->i;
+            $start = true;
+            // ^(?!.*(a|b)) - the text must not contain a or b (only valid right after ^)
+            while ('(' === $this->peek() && '?' === $this->peek(1) && '!' === $this->peek(2)) {
+                $this->i += 3;
+                if ('.' !== $this->peek() || '*' !== $this->peek(1)) {
+                    throw new RuleTranslationError('regex', '(?!');
+                }
+                $this->i += 2;
+                foreach ($this->inner() as $v) {
+                    if ('' === $v) {
+                        throw new RuleTranslationError('empty');
+                    }
+                    $not[] = $v;
+                }
+                $this->expect(')');
+            }
+        }
+        if ('.' === $this->peek() && '*' === $this->peek(1)) {        // ".*" at the start: anywhere
+            $this->i += 2;
+            $start = false;
+        }
+        [$variants, $end] = $this->sequence(true);
+
+        return ['start' => $start, 'end' => $end, 'variants' => $variants, 'not' => array_values(array_unique($not))];
+    }
+
+    /** @return array{0: list<string>, 1: bool} variants, anchored at the end */
+    private function sequence(bool $top): array
+    {
+        $variants = [''];
+        $end      = false;
+        while (null !== ($ch = $this->peek()) && '|' !== $ch && ')' !== $ch) {
+            if ('$' === $ch) {
+                $next = $this->peek(1);
+                if ($top && (null === $next || '|' === $next)) {
+                    ++$this->i;
+                    $end = true;
+
+                    break;
+                }
+
+                throw new RuleTranslationError('regex', '$');
+            }
+            if ($top && '.' === $ch && '*' === $this->peek(1)) {       // ".*" at the end: nothing to compare
+                $next = $this->peek(2);
+                if (null === $next || '|' === $next) {
+                    $this->i += 2;
+
+                    break;
+                }
+                if ('$' === $next && (null === $this->peek(3) || '|' === $this->peek(3))) {
+                    $this->i += 3;
+
+                    break;
+                }
+            }
+            $variants = $this->product($variants, $this->quantified($this->atom()));
+        }
+
+        return [array_values(array_unique($variants)), $end];
+    }
+
+    /** @return array{0: list<string>, 1: string} choices and kind (char|space|group|none) */
+    private function atom(): array
+    {
+        $ch = $this->c[$this->i++];
+        switch ($ch) {
+            case '\\':
+                $e = $this->c[$this->i++] ?? null;
+                if (null === $e) {
+                    throw new RuleTranslationError('regex', '\\');
+                }
+                if ('b' === $e) {
+                    $this->approx['b'] = true;
+
+                    return [[''], 'none'];
+                }
+                if ('s' === $e) {
+                    return [[' '], 'space'];
+                }
+                if (1 === preg_match('/^[\p{L}\p{N}]$/u', $e)) {
+                    throw new RuleTranslationError('regex', '\\'.$e);
+                }
+
+                return [[$e], 'char'];
+
+            case '(':
+                if ('?' === $this->peek()) {
+                    if (':' !== $this->peek(1)) {
+                        throw new RuleTranslationError('regex', '(?'.$this->peek(1));
+                    }
+                    $this->i += 2;
+                }
+                $inner = $this->inner();
+                $this->expect(')');
+
+                return [$inner, 'group'];
+
+            case '[':
+                throw new RuleTranslationError('regex', '[…]');
+
+            case '.':
+            case '*':
+            case '+':
+            case '?':
+            case '{':
+            case '^':
+            case '$':
+                throw new RuleTranslationError('regex', $ch);
+
+            default:
+                return [[$ch], 'char'];
+        }
+    }
+
+    /** @param array{0: list<string>, 1: string} $atom */
+    private function quantified(array $atom): array
+    {
+        [$choices, $kind] = $atom;
+        $q = $this->peek();
+        if (!in_array($q, ['?', '*', '+', '{'], true)) {
+            return $choices;
+        }
+        ++$this->i;
+        if (in_array($this->peek(), ['?', '+'], true)) {
+            throw new RuleTranslationError('regex', $q.$this->peek());   // lazy / possessive
+        }
+        if ('?' === $q && 'none' !== $kind) {
+            return array_values(array_unique(array_merge([''], $choices)));
+        }
+        if ('space' === $kind && '+' === $q) {
+            $this->approx['ws'] = true;
+
+            return [' '];
+        }
+        if ('space' === $kind && '*' === $q) {
+            $this->approx['ws'] = true;
+
+            return ['', ' '];
+        }
+
+        throw new RuleTranslationError('regex', $q);
+    }
+
+    /** @return list<string> the alternatives of a group (until ")") */
+    private function inner(): array
+    {
+        $out = [];
+        while (true) {
+            [$variants] = $this->sequence(false);
+            $out        = array_merge($out, $variants);
+            if ('|' !== $this->peek()) {
+                break;
+            }
+            ++$this->i;
+        }
+
+        return array_values(array_unique($out));
+    }
+
+    private function expect(string $ch): void
+    {
+        if ($ch !== $this->peek()) {
+            throw new RuleTranslationError('regex', '(');
+        }
+        ++$this->i;
+    }
+
+    /** @param list<string> $a @param list<string> $b @return list<string> */
+    private function product(array $a, array $b): array
+    {
+        $out = [];
+        foreach ($a as $x) {
+            foreach ($b as $y) {
+                $out[$x.$y] = true;
+                if (count($out) > self::MAX) {
+                    throw new RuleTranslationError('variants', '>'.self::MAX);
+                }
+            }
+        }
+
+        return array_map('strval', array_keys($out));
+    }
+}
+
+final class FireflyRuleTranslator
+{
+    /** Firefly rules per payee rule and side at most (alternatives x accounts) */
+    public const MAX_VARIANTS = 12;
+
+    public const REASONS = [
+        'auto'                 => '"auto:" rules have no Firefly equivalent',
+        'memo'                 => 'Firefly rules can not check GnuCash split memos',
+        'placeholder'          => 'the counterparty uses a placeholder (%s) - Firefly sets fixed names only',
+        'fallback_placeholder' => 'the fallback counterparty "%s" contains a placeholder',
+        'expression'           => 'the name starts with "=" (a Firefly rule expression)',
+        'regex'                => 'the regular expression uses %s - Firefly rules have no patterns',
+        'flags'                => 'regular expression option /%s',
+        'empty'                => 'the pattern matches every text',
+        'variants'             => 'too many alternatives (%s)',
+        'konto_none'           => '"konto:" matches no account that exists in Firefly',
+        'quote'                => 'the text contains " or \\',
+        'too_long'             => 'the text is longer than 1024 characters',
+    ];
+
+    public const APPROX = [
+        'b'             => '\b (word boundary) dropped - matches a bit more',
+        'ws'            => '\s+ / \s* became one / no space',
+        'case'          => 'no /i: Firefly ignores upper/lower case',
+        'case_is'       => '^...$ with /i: Firefly compares "is" exactly (depends on the database)',
+        'trim'          => 'spaces at the start/end removed',
+        'like'          => '% or _ act as wildcards in Firefly',
+        'konto_partial' => '"konto:" also matches accounts that do not exist in Firefly',
+    ];
+
+    /**
+     * @param array<string, array<string, mixed>> $accounts GnuCash path => mapping (as, name) from import.json
+     */
+    public function __construct(private array $accounts, private string $fallback)
+    {
+    }
+
+    /**
+     * @return array{specs: list<array>, rules: list<array>}
+     *   specs: the Firefly rules to create, in order (line, side, title, triggers, action, sim)
+     *   rules: one entry per payee rule (line, src, payee, status ok|approx|approx_skipped|skipped,
+     *          reason, detail, approx, firefly = number of Firefly rules)
+     */
+    public function translate(PayeeRules $rules, bool $withApprox): array
+    {
+        $specs = [];
+        $info  = [];
+        foreach ($rules->rules as $r) {
+            $entry = ['line' => $r['line'], 'src' => (string) ($r['src'] ?? ''), 'payee' => $r['payee'], 'status' => 'ok', 'reason' => '', 'detail' => '', 'approx' => [], 'firefly' => 0];
+
+            try {
+                [$list, $approx] = $this->rule($r);
+            } catch (RuleTranslationError $e) {
+                $info[] = ['status' => 'skipped', 'reason' => $e->reason, 'detail' => $e->detail] + $entry;
+
+                continue;
+            }
+            $entry['approx'] = $approx;
+            if ([] !== $approx) {
+                $entry['status'] = $withApprox ? 'approx' : 'approx_skipped';
+                if (!$withApprox) {
+                    $info[] = $entry;
+
+                    continue;
+                }
+            }
+            $entry['firefly'] = count($list);
+            array_push($specs, ...$list);
+            $info[] = $entry;
+        }
+
+        return ['specs' => $specs, 'rules' => $info];
+    }
+
+    public static function reasonText(string $reason, string $detail): string
+    {
+        return sprintf(self::REASONS[$reason] ?? $reason, $detail);
+    }
+
+    /** @return array{0: list<array>, 1: list<string>} Firefly rule specs and approximation codes */
+    private function rule(array $r): array
+    {
+        foreach ($r['conds'] as $c) {
+            if ('auto' === $c['field'] || 'memo' === $c['field']) {
+                throw new RuleTranslationError($c['field']);
+            }
+        }
+        $target = (string) $r['payee'];
+        if ('-' === $target) {
+            if (str_contains($this->fallback, '{')) {
+                throw new RuleTranslationError('fallback_placeholder', $this->fallback);
+            }
+            $target = '' === trim($this->fallback) ? '(diverse)' : $this->fallback;
+        } elseif (1 === preg_match('/\$\d|\{(category|description|name)\}/', $target, $m)) {
+            throw new RuleTranslationError('placeholder', $m[0]);
+        }
+        $target = Util::truncate(Util::collapse($target), 255);
+        if (str_starts_with($target, '=')) {
+            throw new RuleTranslationError('expression');
+        }
+        $sides  = '' === $r['side'] ? ['expense', 'revenue'] : [$r['side']];
+        $approx = [];
+        $out    = [];
+        foreach ($sides as $side) {
+            $combos = [['triggers' => [], 'sim' => []]];
+            foreach ($r['conds'] as $c) {
+                [$opts, $ap] = $this->condOptions($c, $side);
+                $approx      = array_merge($approx, $ap);
+                $next        = [];
+                foreach ($combos as $a) {
+                    foreach ($opts as $b) {
+                        $next[] = ['triggers' => array_merge($a['triggers'], $b['triggers']), 'sim' => array_merge($a['sim'], $b['sim'])];
+                        if (count($next) > self::MAX_VARIANTS) {
+                            throw new RuleTranslationError('variants', '>'.self::MAX_VARIANTS);
+                        }
+                    }
+                }
+                $combos = $next;
+            }
+            $n = count($combos);
+            foreach ($combos as $k => $combo) {
+                $out[] = [
+                    'line'     => $r['line'],
+                    'side'     => $side,
+                    'title'    => self::title($r['line'], $target, $side, $k + 1, $n),
+                    'triggers' => array_merge([['type' => 'transaction_type', 'value' => 'expense' === $side ? 'withdrawal' : 'deposit', 'prohibited' => false]], $combo['triggers']),
+                    'action'   => ['type' => 'expense' === $side ? 'set_destination_account' : 'set_source_account', 'value' => $target],
+                    'sim'      => $combo['sim'],
+                ];
+            }
+        }
+
+        return [$out, array_values(array_unique($approx))];
+    }
+
+    private static function title(int $line, string $target, string $side, int $k, int $n): string
+    {
+        $suffix = sprintf(' (%s%s)', 'expense' === $side ? 'Ausgabe' : 'Einnahme', $n > 1 ? sprintf(' %d/%d', $k, $n) : '');
+        $prefix = sprintf('GnuCash Z.%d: ', $line);
+
+        return $prefix.Util::truncate($target, 100 - mb_strlen($prefix.$suffix, 'UTF-8')).$suffix;
+    }
+
+    /** @return array{0: list<array{triggers: list<array>, sim: list<array>}>, 1: list<string>} alternatives (any of) and approximations */
+    private function condOptions(array $c, string $side): array
+    {
+        switch ($c['field']) {
+            case 'iban':
+                $type = 'expense' === $side ? 'destination_account_nr_is' : 'source_account_nr_is';
+
+                return [[['triggers' => [['type' => $type, 'value' => (string) $c['text'], 'prohibited' => false]], 'sim' => [['f' => 'iban', 'v' => (string) $c['text']]]]], []];
+
+            case 'konto':
+                return $this->kontoOptions($c);
+
+            case 'category':
+                return $this->textOptions((string) ($c['raw'] ?? ''), null !== $c['regex'], 'category', 'cat');
+
+            default:
+                return $this->textOptions((string) ($c['raw'] ?? ''), null !== $c['regex'], 'description', 'desc');
+        }
+    }
+
+    private function kontoOptions(array $c): array
+    {
+        $out     = [];
+        $partial = false;
+        foreach ($this->accounts as $path => $m) {
+            $path = (string) $path;
+            $hit  = null !== $c['regex'] ? 1 === preg_match($c['regex'], $path) : str_contains(Util::lower($path), (string) $c['text']);
+            if (!$hit) {
+                continue;
+            }
+            $as   = (string) ($m['as'] ?? '');
+            $name = (string) ($m['name'] ?? '');
+            if ('' === $name || !in_array($as, ['asset', 'liability', 'category'], true)) {
+                $partial = true;
+
+                continue;
+            }
+            $out[] = ['triggers' => [['type' => 'category' === $as ? 'category_is' : 'account_is', 'value' => $name, 'prohibited' => false]], 'sim' => [['f' => 'acct', 'v' => $path]]];
+        }
+        if ([] === $out) {
+            throw new RuleTranslationError('konto_none');
+        }
+
+        return [$out, $partial ? ['konto_partial'] : []];
+    }
+
+    /** @return array{0: list<array>, 1: list<string>} */
+    private function textOptions(string $raw, bool $isRegex, string $kind, string $f): array
+    {
+        if (!$isRegex) {
+            [$trigger, $sim, $ap] = self::value($kind, 'contains', trim($raw), $f, false);
+
+            return [[['triggers' => [$trigger], 'sim' => [$sim]]], $ap];
+        }
+        if (1 !== preg_match('~^/(.*)/([a-zA-Z]*)$~s', $raw, $m)) {
+            throw new RuleTranslationError('regex', $raw);
+        }
+        if (1 === preg_match('/[^ius]/', $m[2], $bad)) {
+            throw new RuleTranslationError('flags', $bad[0]);
+        }
+        $ci     = str_contains($m[2], 'i');
+        $parser = new RegexLiterals($m[1]);
+        $alts   = $parser->parse();
+        $approx = array_keys($parser->approx);
+        $opts   = [];
+        foreach ($alts as $alt) {
+            $op = $alt['start'] && $alt['end'] ? 'is' : ($alt['start'] ? 'starts' : ($alt['end'] ? 'ends' : 'contains'));
+            if ('is' === $op && $ci) {
+                $approx[] = 'case_is';
+            }
+            if ('is' !== $op && !$ci) {
+                $approx[] = 'case';
+            }
+            $notTriggers = [];
+            $notSims     = [];
+            foreach ($alt['not'] as $nv) {
+                [$trigger, $sim, $ap] = self::value($kind, 'contains', $nv, $f, true);
+                $notTriggers[]        = $trigger;
+                $notSims[]            = $sim;
+                $approx               = array_merge($approx, $ap);
+            }
+            foreach ($alt['variants'] as $v) {
+                [$trigger, $sim, $ap] = self::value($kind, $op, $v, $f, false);
+                $approx               = array_merge($approx, $ap);
+                $opts[]               = ['triggers' => array_merge([$trigger], $notTriggers), 'sim' => array_merge([$sim], $notSims)];
+            }
+        }
+
+        return [$opts, array_values(array_unique($approx))];
+    }
+
+    /** @return array{0: array, 1: array, 2: list<string>} trigger, simulation condition, approximations */
+    private static function value(string $kind, string $op, string $v, string $f, bool $prohibited): array
+    {
+        $t  = trim($v);
+        $ap = $t !== $v ? ['trim'] : [];
+        if ('' === $t) {
+            throw new RuleTranslationError('empty');
+        }
+        if (str_contains($t, '"') || str_contains($t, '\\')) {
+            throw new RuleTranslationError('quote');
+        }
+        if (mb_strlen($t, 'UTF-8') > 1024) {
+            throw new RuleTranslationError('too_long');
+        }
+        if (str_contains($t, '%') || str_contains($t, '_')) {
+            $ap[] = 'like';
+        }
+
+        return [['type' => $kind.'_'.$op, 'value' => $t, 'prohibited' => $prohibited], ['f' => $f, 'op' => $op, 'v' => $t, 'not' => $prohibited], $ap];
+    }
+
+    /**
+     * Which counterparty the Firefly rules would set for the bookings of the book, compared
+     * with the import (first matching rule wins, like stop_processing in one rule group).
+     *
+     * @param list<array> $specs
+     * @param list<array{tx:string, desc:string, side:string, category:string, accounts:list<string>, ibans:list<string>, name:string, source:string}> $cases
+     *
+     * @return array{total:int, same:int, other:int, missing:int, free:int, lines: array<int, array{hits:int, other:int, against:array<string, int>}>, missing_lines: array<int, int>, examples: list<array>}
+     *   against: for the bookings where a Firefly rule sets another name - which payee rule
+     *   ("37"), "auto" or "fallback" gave them their name in the import
+     */
+    public static function simulate(array $specs, array $cases): array
+    {
+        $buckets  = ['same' => [], 'other' => [], 'missing' => [], 'free' => []];
+        $lines    = [];
+        $missing  = [];
+        $examples = [];
+        $all      = [];
+        foreach ($cases as $c) {
+            $all[$c['tx']] = true;
+            $hit           = null;
+            foreach ($specs as $s) {
+                if (self::matches($s, $c)) {
+                    $hit = $s;
+
+                    break;
+                }
+            }
+            if (null === $hit) {
+                if (1 === preg_match('/^rule:(?:fallback:)?(\d+)/', $c['source'], $m)) {
+                    $buckets['missing'][$c['tx']]          = true;
+                    $missing[(int) $m[1]][$c['tx']] = true;
+                } else {
+                    $buckets['free'][$c['tx']] = true;
+                }
+
+                continue;
+            }
+            $line                           = (int) $hit['line'];
+            $lines[$line]['hits'][$c['tx']] = true;
+            if ($hit['action']['value'] === $c['name']) {
+                $buckets['same'][$c['tx']] = true;
+
+                continue;
+            }
+            $buckets['other'][$c['tx']]      = true;
+            $lines[$line]['other'][$c['tx']] = true;
+            $lines[$line]['against'][preg_replace('/^rule:(?:fallback:)?/', '', $c['source'])][$c['tx']] = true;
+            $key                             = $c['desc'].'|'.$c['side'].'|'.$line;
+            if (!isset($examples[$key]) && count($examples) < 200) {
+                $examples[$key] = ['desc' => $c['desc'], 'side' => $c['side'], 'ours' => $c['name'], 'source' => $c['source'], 'firefly' => $hit['action']['value'], 'line' => $line, 'count' => 0];
+            }
+            if (isset($examples[$key])) {
+                ++$examples[$key]['count'];
+            }
+        }
+        $out = ['total' => count($all), 'lines' => [], 'missing_lines' => [], 'examples' => array_values($examples)];
+        foreach ($buckets as $k => $set) {
+            $out[$k] = count($set);
+        }
+        foreach ($lines as $line => $l) {
+            $out['lines'][$line] = ['hits' => count($l['hits'] ?? []), 'other' => count($l['other'] ?? []), 'against' => array_map('count', $l['against'] ?? [])];
+        }
+        foreach ($missing as $line => $set) {
+            $out['missing_lines'][$line] = count($set);
+        }
+        usort($out['examples'], static fn ($a, $b) => $b['count'] <=> $a['count']);
+
+        return $out;
+    }
+
+    private static function matches(array $spec, array $c): bool
+    {
+        if ($spec['side'] !== $c['side']) {
+            return false;
+        }
+        foreach ($spec['sim'] as $cond) {
+            $ok = match ($cond['f']) {
+                'desc'  => self::compare($cond['op'], $c['desc'], $cond['v']),
+                'cat'   => self::compare($cond['op'], $c['category'], $cond['v']),
+                'iban'  => in_array($cond['v'], $c['ibans'], true),
+                'acct'  => in_array($cond['v'], $c['accounts'], true),
+                default => false,
+            };
+            if ($cond['not'] ?? false) {
+                $ok = !$ok;
+            }
+            if (!$ok) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /** Firefly: contains/starts/ends with LIKE (case-insensitive), "is" with = (exact). */
+    private static function compare(string $op, string $subject, string $v): bool
+    {
+        if ('is' === $op) {
+            return $subject === $v;
+        }
+        $s = Util::lower($subject);
+        $v = Util::lower($v);
+
+        return match ($op) {
+            'starts' => str_starts_with($s, $v),
+            'ends'   => str_ends_with($s, $v),
+            default  => str_contains($s, $v),
+        };
     }
 }
 
@@ -4967,6 +5591,185 @@ final class Purger
     }
 }
 
+// =====================================================================================
+// firefly-rules: payee rules -> Firefly III rule group
+// =====================================================================================
+
+final class RuleExporter
+{
+    public const GROUP = 'GnuCash-Import';
+
+    public static function run(Args $args, \DateTimeZone $tz, string $bookFile): int
+    {
+        $args->check(['config', 'rules', 'timezone', 'verbose', 'quiet', 'dry-run', 'yes', 'group', 'approx', 'keep-conflicts', 'report-json', 'url', 'token', 'token-file', 'cacert', 'timeout']);
+        $group = trim((string) ($args->get('group') ?? ''));
+        $group = '' === $group ? self::GROUP : Util::truncate($group, 100);
+        $p     = new Pipeline($bookFile, $args, $tz);
+        $p->run();
+        $accounts = [];
+        foreach ($p->config->accounts as $m) {
+            if (isset($m['gnucash'])) {
+                $accounts[(string) $m['gnucash']] = $m;
+            }
+        }
+        $approx = $args->has('approx');
+        $tr     = new FireflyRuleTranslator($accounts, (string) $p->config->opt('payee_fallback'));
+        $res    = $tr->translate($p->rules, $approx);
+        $cases  = [];
+        foreach ($p->payees->usages() as $key => $u) {
+            /** @var GTransaction $t */
+            $t       = $u['tx'];
+            $r       = $p->payees->get($key);
+            $cases[] = ['tx' => $t->guid, 'desc' => Util::collapse($t->description), 'side' => $u['side'], 'category' => (string) $u['category'],
+                'accounts' => $u['accounts'] ?? [], 'ibans' => PayeeResolver::ibansOf($t), 'name' => $r['name'], 'source' => $r['source']];
+        }
+        $sim = FireflyRuleTranslator::simulate($res['specs'], $cases);
+        // a Firefly rule that would give bookings another counterparty than the import (an
+        // earlier payee rule is missing in Firefly, or an approximation catches more) is left
+        // out - unless --keep-conflicts. Leaving one out can expose a later one: repeat.
+        while (!$args->has('keep-conflicts')) {
+            $bad = array_filter($sim['lines'], static fn ($l) => $l['other'] > 0);
+            if ([] === $bad) {
+                break;
+            }
+            foreach ($res['rules'] as &$r) {
+                if (isset($bad[$r['line']])) {
+                    $against     = $bad[$r['line']]['against'];
+                    arsort($against);
+                    $r['status']  = 'conflict';
+                    $r['reason']  = 'conflict';
+                    $r['detail']  = (string) $bad[$r['line']]['other'];
+                    $r['against'] = $against;
+                    $r['firefly'] = 0;
+                }
+            }
+            unset($r);
+            $res['specs'] = array_values(array_filter($res['specs'], static fn ($sp) => !isset($bad[$sp['line']])));
+            $sim          = FireflyRuleTranslator::simulate($res['specs'], $cases);
+        }
+
+        Out::step(sprintf('Payee rules -> Firefly III rules (%s, group "%s")', $p->rulesFile, $group));
+        $count = ['ok' => 0, 'approx' => 0, 'approx_skipped' => 0, 'skipped' => 0, 'conflict' => 0];
+        foreach ($res['rules'] as $r) {
+            ++$count[$r['status']];
+            $what = match ($r['status']) {
+                'ok'             => sprintf('%d Firefly rule%s', $r['firefly'], 1 === $r['firefly'] ? '' : 's'),
+                'approx'         => sprintf('%d Firefly rule%s, approximated: %s', $r['firefly'], 1 === $r['firefly'] ? '' : 's', implode('; ', array_map(static fn ($c) => FireflyRuleTranslator::APPROX[$c] ?? $c, $r['approx']))),
+                'approx_skipped' => 'only approximately possible (--approx): '.implode('; ', array_map(static fn ($c) => FireflyRuleTranslator::APPROX[$c] ?? $c, $r['approx'])),
+                'conflict'       => sprintf('left out (--keep-conflicts): would give %s bookings another counterparty than the import (%s)', $r['detail'],
+                    implode(', ', array_map(static fn ($k, $v) => sprintf('%d from %s', $v, ctype_digit((string) $k) ? 'line '.$k : $k), array_keys($r['against']), $r['against']))),
+                default          => 'not translatable: '.FireflyRuleTranslator::reasonText($r['reason'], $r['detail']),
+            };
+            if ('ok' === $r['status'] && !Out::$verbose) {
+                continue;
+            }
+            Out::info(sprintf('  line %-4d %s', $r['line'], Util::truncate($r['src'], 110)));
+            Out::info('            -> '.$what);
+        }
+        Out::info(sprintf('  %d of %d payee rules -> %d Firefly rules (%d approximated); %d only approximately possible, %d not translatable, %d left out (conflicts)',
+            $count['ok'] + $count['approx'], count($res['rules']), count($res['specs']), $count['approx'], $count['approx_skipped'], $count['skipped'], $count['conflict']));
+
+        Out::step(sprintf('Check against the book (%d transactions with a counterparty)', $sim['total']));
+        Out::info(sprintf('  same counterparty as the import:          %6d', $sim['same']));
+        Out::info(sprintf('  another counterparty than the import:     %6d', $sim['other']));
+        Out::info(sprintf('  no Firefly rule (payee rule not exported): %5d', $sim['missing']));
+        Out::info(sprintf('  no Firefly rule (automatic name/fallback): %5d', $sim['free']));
+        foreach (array_slice($sim['examples'], 0, 10) as $e) {
+            Out::warn(sprintf('%dx "%s" (%s): import "%s" (%s), Firefly "%s" (line %d)', $e['count'], Util::truncate($e['desc'], 60), $e['side'], $e['ours'], $e['source'], $e['firefly'], $e['line']));
+        }
+
+        $report = ['version' => VERSION, 'group' => $group, 'approx' => $approx, 'keep_conflicts' => $args->has('keep-conflicts'), 'rules_file' => basename($p->rulesFile), 'rules' => $res['rules'],
+            'specs' => array_map(static fn ($s) => array_diff_key($s, ['sim' => true]), $res['specs']), 'sim' => $sim, 'firefly' => null];
+        $write  = static function () use ($args, &$report): void {
+            if (null !== ($json = $args->get('report-json')) && '' !== $json) {
+                file_put_contents($json, json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE)."\n");
+            }
+        };
+        $write();
+        if ($args->has('dry-run')) {
+            Out::info(sprintf('Dry run - nothing was sent to Firefly (%d rules would be created in group "%s").', count($res['specs']), $group));
+
+            return 0;
+        }
+        if ([] === $res['specs']) {
+            Out::info('Nothing to send: no payee rule can be expressed as a Firefly rule.');
+
+            return 0;
+        }
+        $api = FireflyClient::fromArgs($args);
+        Out::step(sprintf('Firefly rule group "%s"', $group));
+        $gid = null;
+        foreach ($api->all('rule-groups') as $g) {
+            if ((string) ($g['attributes']['title'] ?? '') === $group) {
+                $gid = (string) $g['id'];
+
+                break;
+            }
+        }
+        $old = [];
+        if (null !== $gid) {
+            foreach ($api->all('rule-groups/'.$gid.'/rules') as $rule) {
+                $old[] = (string) $rule['id'];
+            }
+        }
+        Out::info(null === $gid ? '  new rule group' : sprintf('  exists with %d rules - they are replaced', count($old)));
+        $question = sprintf('Create %d Firefly rules in rule group "%s"%s?', count($res['specs']), $group, [] === $old ? '' : sprintf(' (replaces its %d rules)', count($old)));
+        if (!Out::confirm($question, $args->has('yes'))) {
+            return 1;
+        }
+        $desc = sprintf('Created by firefly-gnucash from %s - "firefly-rules" replaces all rules of this group. Order matters: the first matching rule wins (stop processing).', basename($p->rulesFile));
+        if (null === $gid) {
+            $gid = (string) ($api->post('rule-groups', ['title' => $group, 'description' => $desc, 'active' => true])['data']['id'] ?? '');
+            if ('' === $gid) {
+                throw new ApiError('Firefly did not return the new rule group');
+            }
+        }
+        foreach ($old as $id) {
+            try {
+                $api->delete('rules/'.$id);
+            } catch (ApiError $e) {
+                if (404 !== $e->status) {
+                    throw $e;
+                }
+            }
+        }
+        $taken = [];
+        foreach ($api->all('rules') as $rule) {
+            $taken[Util::lower((string) ($rule['attributes']['title'] ?? ''))] = true;   // titles are unique per user
+        }
+        Out::step(sprintf('Creating %d Firefly rules', count($res['specs'])));
+        $srcByLine = array_column($res['rules'], 'src', 'line');
+        $n         = 0;
+        foreach ($res['specs'] as $s) {
+            $title = $s['title'];
+            for ($k = 2; isset($taken[Util::lower($title)]); ++$k) {
+                $title = Util::truncate($s['title'], 94).' #'.$k;
+            }
+            $taken[Util::lower($title)] = true;
+            $api->post('rules', [
+                'title'           => $title,
+                'description'     => Util::truncate(sprintf("firefly-gnucash, %s line %d:\n%s", basename($p->rulesFile), $s['line'], $srcByLine[$s['line']] ?? ''), 32000),
+                'rule_group_id'   => $gid,
+                'trigger'         => 'store-journal',
+                'active'          => true,
+                'strict'          => true,
+                'stop_processing' => true,
+                'triggers'        => array_map(static fn ($t) => $t + ['active' => true, 'stop_processing' => false], $s['triggers']),
+                'actions'         => [$s['action'] + ['active' => true, 'stop_processing' => false]],
+            ]);
+            ++$n;
+            if (0 === $n % 10 || $n === count($res['specs'])) {
+                Out::info(sprintf('  %d/%d rules created', $n, count($res['specs'])));
+            }
+        }
+        $report['firefly'] = ['group_id' => $gid, 'created' => $n, 'replaced' => count($old)];
+        $write();
+        Out::info(sprintf('Done: %d Firefly rules in rule group "%s"%s. They act on new transactions (Firefly: Rules > "%s" can also apply them to existing ones).', $n, $group, [] === $old ? '' : sprintf(' (%d old rules replaced)', count($old)), $group));
+
+        return 0;
+    }
+}
+
 // @@END@@
 
 // =====================================================================================
@@ -4984,6 +5787,7 @@ final class App
           php firefly-gnucash.php export  OUT.gnucash  [--from=DATE] [--to=DATE] [--uncompressed]
           php firefly-gnucash.php compare A.gnucash B.gnucash [--by-year]
           php firefly-gnucash.php purge   [--tag=TAG] [--accounts] [--dry-run] [--yes]
+          php firefly-gnucash.php firefly-rules BOOK.gnucash [--dry-run] [--yes] [--group=TITLE] [--approx] [--keep-conflicts] [--report-json=FILE]
 
         plan     Reads the GnuCash book (XML/compressed XML/SQLite) and writes next to it:
                    BOOK.import.json      account mapping + options (edit, then run plan again)
@@ -5006,8 +5810,17 @@ final class App
         purge    Deletes the transactions with the import tag (default "GnuCash-Import");
                  --accounts also deletes the accounts, counterparties and categories the
                  import created. For test runs.
+        firefly-rules  Translates the payee rules into Firefly III rules for new transactions
+                 (one rule group, default "GnuCash-Import"; a second run replaces its rules).
+                 Firefly rules compare plain texts, IBANs, categories and accounts: rules with
+                 wildcards (\d, [...], .) or placeholders ($1, {category}) are listed and skipped,
+                 --approx also takes rules that only fit approximately (\b dropped, \s+ -> " ").
+                 Checks every booking of the book: a Firefly rule that would set another
+                 counterparty than the import (e.g. because an earlier payee rule can not be
+                 translated) is left out, unless --keep-conflicts.
+                 --dry-run only shows the translation (no Firefly connection needed).
 
-        Firefly connection (import/export/purge):
+        Firefly connection (import/export/purge/firefly-rules):
           --url=URL           Firefly III base URL, e.g. https://firefly.example.org  (or FIREFLY_URL)
           --token-file=FILE   file containing a Personal Access Token                (or FIREFLY_TOKEN)
           --token=TOKEN       the token itself (visible in the process list - prefer the file)
@@ -5050,6 +5863,7 @@ final class App
                 'export'  => self::export($args, $tz),
                 'compare' => self::compare($args, $tz),
                 'purge'   => self::purge($args),
+                'firefly-rules' => RuleExporter::run($args, $tz, self::bookArg($args)),
                 'version', '--version' => self::out('firefly-gnucash '.VERSION),
                 default   => self::out(str_replace('VERSION', VERSION, self::HELP), 'help' === $cmd || '--help' === $cmd || $args->has('help') ? 0 : 2),
             };
