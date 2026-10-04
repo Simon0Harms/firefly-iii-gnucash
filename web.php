@@ -1468,6 +1468,10 @@ function textsDe(): array
         'src.fallback'    => 'Sammelkonto',
         'src.rule_line'   => 'Regel (Zeile {n})',
         'src.rule_fallback' => 'Regel → Sammelkonto',
+        'src.rule_fallback_line' => 'Regel (Zeile {n}) → Sammelkonto',
+        'rules.goto_title'   => 'Zur Regel springen',
+        'rules.goto_missing' => 'Die Regeldatei hat keine Zeile {n} – bitte neu berechnen.',
+        'rules.goto_dirty'   => 'Ungespeicherte Änderungen: die Zeilennummer bezieht sich auf die gespeicherte Datei.',
 
         'sub.assistant'   => 'Regel erstellen',
         'asst.title'      => 'Regel erstellen',
@@ -1831,6 +1835,10 @@ function textsEn(): array
         'src.fallback'    => 'fallback',
         'src.rule_line'   => 'rule (line {n})',
         'src.rule_fallback' => 'rule → fallback',
+        'src.rule_fallback_line' => 'rule (line {n}) → fallback',
+        'rules.goto_title'   => 'Jump to the rule',
+        'rules.goto_missing' => 'The rules file has no line {n} – please recalculate.',
+        'rules.goto_dirty'   => 'Unsaved changes: the line number refers to the saved file.',
 
         'sub.assistant'   => 'Create rule',
         'asst.title'      => 'Create a rule',
@@ -2268,6 +2276,8 @@ td.text { min-width: 16ch; max-width: 46ch; overflow-wrap: break-word; }
 #tip tr.hit td.acc { font-weight: 650; }
 #tip td.memo { color: var(--muted); overflow-wrap: anywhere; min-width: 14ch; }
 .badge:empty { display: none; }
+a.ruleref { color: var(--accent, #2563eb); text-decoration: underline dotted; text-underline-offset: 3px; }
+a.ruleref:hover { text-decoration-style: solid; }
 tr.changed td { background: color-mix(in srgb, var(--warn-soft) 70%, transparent); }
 .tabletools { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; margin-bottom: .6rem; }
 .tabletools input[type=search] { flex: 1 1 260px; }
@@ -3062,12 +3072,40 @@ class Grid {
 }
 
 const sideOf = v => (/^Ausgaben|expense/i.test(v) ? 'expense' : /^Einnahmen|revenue/i.test(v) ? 'revenue' : v);
-const srcLabel = s => String(s || '').split(',').filter(Boolean).map(x => {
-  const m = /^rule:(\d+)$/.exec(x);
-  if (m) return t('src.rule_line', {n: m[1]});
-  if (x === 'rule:fallback') return t('src.rule_fallback');
-  return t('src.' + x) === 'src.' + x ? x : t('src.' + x);
-}).join(', ');
+const srcPart = x => {
+  let m = /^rule:(\d+)$/.exec(x);
+  if (m) return {label: t('src.rule_line', {n: m[1]}), line: +m[1]};
+  m = /^rule:fallback(?::(\d+))?$/.exec(x);
+  if (m) return {label: m[1] ? t('src.rule_fallback_line', {n: m[1]}) : t('src.rule_fallback'), line: m[1] ? +m[1] : 0};
+  return {label: t('src.' + x) === 'src.' + x ? x : t('src.' + x), line: 0};
+};
+const srcLabel = s => String(s || '').split(',').filter(Boolean).map(x => srcPart(x).label).join(', ');
+/** source with clickable rule lines ("Regel (Zeile 31)" jumps to that line in the rules editor) */
+const srcCell = s => {
+  const out = [];
+  for (const x of String(s || '').split(',').filter(Boolean)) {
+    const p = srcPart(x);
+    if (out.length) out.push(', ');
+    out.push(p.line ? el('a', {href: '#', class: 'ruleref', title: t('rules.goto_title'), onclick: e => { e.preventDefault(); e.stopPropagation(); gotoRule(p.line); }}, p.label) : p.label);
+  }
+  return el('span', {}, out);
+};
+/** open the rules editor and select line n (1-based, as in the saved rules file) */
+async function gotoRule(n) {
+  showTab('payees');
+  showSub('rules');
+  if (!S.rules.loaded) await loadRules();
+  const ta = $('#rules-text');
+  const lines = ta.value.split('\n');
+  if (n < 1 || n > lines.length) { toast(t('rules.goto_missing', {n}), true); return; }
+  const start = lines.slice(0, n - 1).reduce((a, l) => a + l.length + 1, 0);
+  ta.focus({preventScroll: true});
+  ta.setSelectionRange(start, start + lines[n - 1].length);
+  const lh = parseFloat(getComputedStyle(ta).lineHeight) || 18;
+  ta.scrollTop = Math.max(0, (n - 1) * lh - ta.clientHeight / 3);
+  ta.scrollIntoView({block: 'center', behavior: 'smooth'});
+  if (S.rules.dirty) toast(t('rules.goto_dirty'));
+}
 const srcKind = s => (/rule/.test(s) ? 'rule' : /fallback/.test(s) ? 'fallback' : 'auto');
 const ex = v => el('div', {class: 'ex', title: v}, v);
 const actBtn = fn => el('button', {type: 'button', class: 'btn small', title: t('asst.open_title'), onclick: e => { e.stopPropagation(); fn(); }}, t('asst.open'));
@@ -3075,7 +3113,7 @@ const actBtn = fn => el('button', {type: 'button', class: 'btn small', title: t(
 const payeeGrid = new Grid('payees', [
   {key: 'payee', label: t('col.payee'), cls: 'text'},
   {key: 'side', label: t('col.side'), text: r => t('kind.' + r.side)},
-  {key: 'source', label: t('col.source'), text: r => srcLabel(r.source)},
+  {key: 'source', label: t('col.source'), text: r => srcLabel(r.source), render: r => srcCell(r.source)},
   {key: 'transactions', label: t('col.count'), num: true, text: r => n(r.transactions), sortv: r => r.transactions},
   {key: 'amount', label: t('col.amount'), num: true, cls: 'nowrap'},
   {key: 'iban', label: 'IBAN', cls: 'nowrap'},
@@ -3091,7 +3129,7 @@ const mapGrid = new Grid('map', [
   {key: 'side', label: t('col.side'), text: r => t('kind.' + r.side)},
   {key: 'transactions', label: t('col.count'), num: true, text: r => n(r.transactions), sortv: r => r.transactions},
   {key: 'payee', label: t('col.payee'), cls: 'text'},
-  {key: 'source', label: t('col.source'), text: r => srcLabel(r.source)},
+  {key: 'source', label: t('col.source'), text: r => srcLabel(r.source), render: r => srcCell(r.source)},
   {key: 'iban', label: 'IBAN', cls: 'nowrap'},
   {key: 'categories', label: t('col.categories'), render: r => ex(r.categories)},
   {key: '_act', label: t('asst.open_title'), nosort: true, cls: 'act', render: r => actBtn(() => openAssistant(fromPayee(r.payee, r.booking_text)))},
@@ -3366,7 +3404,7 @@ function renderAssistant(d) {
   const head = el('tr', {}, [t('col.text'), t('col.side'), t('col.count'), t('asst.col_now'), '', t('asst.col_new')].map((x, i) => el('th', {class: i === 2 ? 'num' : ''}, x)));
   $('#as-table').replaceChildren(el('thead', {}, head), el('tbody', {}, (d.matches || []).map(m => el('tr', {class: m.changes ? '' : 'same'},
     el('td', {class: 'text'}, hov(m.text, m.side)), el('td', {}, t('kind.' + m.side)), el('td', {class: 'num'}, n(m.count)),
-    el('td', {class: 'text'}, m.payee, ' ', el('span', {class: 'muted small'}, srcLabel(m.source))), el('td', {class: 'arrow'}, '→'),
+    el('td', {class: 'text'}, m.payee, ' ', el('span', {class: 'muted small'}, srcCell(m.source))), el('td', {class: 'arrow'}, '→'),
     el('td', {class: 'text new'}, m.kept ? [m.payee, ' ', el('span', {class: 'badge warn'}, t('asst.kept_badge'))] : (m.new || '?'))))));
   $('#as-more').hidden = !d.more;
   $('#as-more').textContent = d.more ? t('asst.more', {n: n(d.more)}) : '';

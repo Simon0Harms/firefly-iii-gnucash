@@ -1616,7 +1616,7 @@ final class PayeeResolver
             $hit        = $this->rules->match($t->description, $u['ibans'], $u['category'], $memos, $u['side'], $u['accounts'] ?? []);
             if (null !== $hit) {
                 $u['name']     = '-' === $hit[0] ? $this->fallbackName($fallback, $u, $t) : $hit[0];
-                $u['source']   = '-' === $hit[0] ? 'rule:fallback' : 'rule:'.$hit[1];
+                $u['source']   = '-' === $hit[0] ? 'rule:fallback:'.$hit[1] : 'rule:'.$hit[1];
                 // a rule only changes the texts it matches (use "iban:" rules for whole IBANs):
                 // "ÜBERWEISUNG ... BÄCKER ERIKA MUSTER ...; MARTHA BEISPIEL" carries the IBAN of
                 // the recipient, which must not turn all her bookings into "Bäcker Erika Muster"
@@ -1745,7 +1745,7 @@ final class PayeeResolver
                 $block = $enough ? $this->rules->matchAuto($name, $u['side']) : null;
                 if (null !== $block) {
                     $u['name']   = '-' === $block[0] ? $this->fallbackName($fallback, $u, $u['tx']) : $block[0];
-                    $u['source'] = '-' === $block[0] ? 'rule:fallback' : 'rule:'.$block[1];
+                    $u['source'] = '-' === $block[0] ? 'rule:fallback:'.$block[1] : 'rule:'.$block[1];
                 } elseif ($enough) {
                     $u['name']   = $name;
                     $u['source'] = 'auto';
@@ -1760,7 +1760,7 @@ final class PayeeResolver
         // IBAN of the counterparty account: the most frequent one, unique per side
         $ibanCount = [];
         foreach ($this->usages as $u) {
-            if (str_ends_with($u['source'], 'fallback') || !($u['linkIban'] ?? true)) {
+            if (str_contains($u['source'], 'fallback') || !($u['linkIban'] ?? true)) {
                 continue;
             }
             foreach ($u['ibans'] as $iban) {
@@ -2672,7 +2672,7 @@ final class Pipeline
             $sk   = $r['name'].'|'.$u['side'];
             $summary[$sk] ??= ['name' => $r['name'], 'side' => $u['side'], 'source' => [], 'tx' => [], 'sum' => [], 'iban' => $r['iban'], 'cats' => [], 'ex' => [], 'first' => $t->date, 'last' => $t->date];
             $e             = &$summary[$sk];
-            $e['source'][preg_replace('/:\d+$/', '', $r['source'])] = true;
+            $e['source'][$r['source']] = true;   // with rule line ("rule:31"): web.php links to it
             $e['tx'][$t->guid] = true;
             $e['cats'][$u['category']] = ($e['cats'][$u['category']] ?? 0) + 1;
             $d                 = Util::collapse($t->description);
