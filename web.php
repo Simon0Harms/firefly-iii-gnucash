@@ -1199,12 +1199,17 @@ function apiSave(Workspace $w): never
     if (null !== $error) {
         json(['ok' => false, 'error' => $error, 'invalid' => true]);
     }
+    $moved = 0;
+    if ('rules' === $what) {
+        loadTool();
+        [$text, $moved] = \FireflyGnuCash\PayeeRules::autoLast($text);   // auto: rules act last: keep them at the end
+    }
     file_put_contents($w->file($what), $text);
     $m           = $w->meta();
     $m['edited'] = time();
     $w->saveMeta($m);
     startPlan($w);
-    json(['ok' => true]);
+    json(['ok' => true, 'moved' => $moved, 'text' => $moved > 0 ? $text : null]);
 }
 
 function apiConnect(): never
@@ -1421,6 +1426,8 @@ function textsDe(): array
         'sum.not_imported'=> 'Nicht importiert (gibt es in Firefly nicht): {list}',
         'sum.rules'       => '{rules} Regeln aktiv, {sugg} Vorschläge zum Zusammenfassen',
         'sum.warnings'    => 'Warnungen ({n})',
+        'rules.auto_moved' => 'Gespeichert – {n} auto:-Regeln ans Ende verschoben (sie wirken ohnehin erst nach allen anderen Regeln).',
+        'rules.auto_moved.one' => 'Gespeichert – 1 auto:-Regel ans Ende verschoben (sie wirkt ohnehin erst nach allen anderen Regeln).',
         'unused.title'    => 'Überflüssige Regeln ({n}) – sie geben keiner Buchung ihr Gegenkonto',
         'unused.none'     => 'trifft keine Buchung',
         'unused.auto'     => 'trifft keinen automatischen Namen',
@@ -1888,6 +1895,8 @@ function textsEn(): array
         'sum.not_imported'=> 'Not imported (no Firefly equivalent): {list}',
         'sum.rules'       => '{rules} rules active, {sugg} merge suggestions',
         'sum.warnings'    => 'Warnings ({n})',
+        'rules.auto_moved' => 'Saved – {n} auto: rules moved to the end (they act after all other rules anyway).',
+        'rules.auto_moved.one' => 'Saved – 1 auto: rule moved to the end (it acts after all other rules anyway).',
         'unused.title'    => 'Unused rules ({n}) – they give no booking its counterparty',
         'unused.none'     => 'matches no booking',
         'unused.auto'     => 'matches no automatic name',
@@ -3655,6 +3664,7 @@ function renderAssistant(d) {
 /** Inserts a rule line after all rules or before the first one (and its comment block). */
 function insertRule(line, position) {
   const ta = $('#rules-text');
+  if (/^\s*(?:(?:ausgaben?|expense|einnahmen?|revenue):\s*)?auto:/i.test(line)) position = 'end';   // auto: rules act last
   const lines = ta.value.replace(/\n+$/, '').split('\n');
   if (lines.length === 1 && lines[0] === '') lines.length = 0;
   const first = lines.findIndex(l => l.trim() !== '' && !l.trim().startsWith('#'));
@@ -3732,8 +3742,10 @@ async function saveRules() {
     const d = await api('save', {method: 'POST', json: {what: 'rules', text}, raw: true});
     if (!d.ok) { errBox.hidden = false; errBox.textContent = d.error; return; }
     errBox.hidden = true;
-    S.rules.server = text; S.rules.dirty = false; markDirty();
-    toast(t('ed.saved'));
+    const saved = d.moved ? d.text : text;
+    if (d.moved) $('#rules-text').value = saved;
+    S.rules.server = saved; S.rules.dirty = false; markDirty();
+    toast(d.moved ? tn('rules.auto_moved', d.moved, {n: d.moved}) : t('ed.saved'));
     refresh();
   } catch (e) { toast(e.message, true); }
 }

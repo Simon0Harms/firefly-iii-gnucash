@@ -368,6 +368,10 @@ file_put_contents($rf, "auto:/x/ && /y/ => Z\n");
 $threw = false;
 try { FireflyGnuCash\PayeeRules::load($rf); } catch (Throwable $e) { $threw = true; }
 check('auto rule cannot be combined', $threw);
+// auto: rules are moved behind the other rules (they act last anyway)
+[$txt, $moved] = FireflyGnuCash\PayeeRules::autoLast("# Kopf\n\nauto:/paypal/i => -\nREWE => REWE\nausgabe: auto:/x/ => Y\n# Kommentar\nAldi => Aldi\n");
+check('auto rules moved to the end', 2 === $moved && "# Kopf\n\nREWE => REWE\n# Kommentar\nAldi => Aldi\n\n".FireflyGnuCash\PayeeRules::AUTO_HEADER."\nauto:/paypal/i => -\nausgabe: auto:/x/ => Y\n" === $txt, json_encode($txt));
+check('auto rules already at the end stay', ["REWE => REWE\nauto:/x/ => -\n", 0] === FireflyGnuCash\PayeeRules::autoLast("REWE => REWE\nauto:/x/ => -\n"));
 // payee rules -> Firefly rules (firefly-rules)
 $ffr = static function (string $rules, bool $approx = false, string $fallback = '(diverse)') use ($rf): array {
     file_put_contents($rf, $rules);

@@ -215,7 +215,9 @@ GnuCash has none. The counterparty is derived from the booking text:
    `memo:`, `konto:` (any GnuCash account of the transaction, full path – e.g. the cash or card
    account it was paid from). `auto:` checks the automatically derived counterparty name instead
    of the booking text (only bookings no other rule catches) and blocks (`=> -`, fallback) or
-   renames it (`{name}` = the automatic name); it cannot be combined with `&&`. A leading `ausgabe:` (or `expense:`) / `einnahme:` (or `revenue:`) limits a rule to
+   renames it (`{name}` = the automatic name); it cannot be combined with `&&`. `auto:` rules
+   always act after all other rules, wherever they stand; `web.php` moves them to the end of the
+   file when saving. A leading `ausgabe:` (or `expense:`) / `einnahme:` (or `revenue:`) limits a rule to
    withdrawals / deposits and can be combined with the others (`ausgabe:iban:DE…`,
    `einnahme:category:/^Erträge/`). ` && ` joins conditions that must all match:
    `/Abrechnung/i && konto:/:Bankgebühren:Musterbank$/ => Musterbank` (`$1…$9` come from the first

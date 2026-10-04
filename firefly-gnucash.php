@@ -1164,6 +1164,46 @@ final class PayeeRules
 
         TXT;
 
+    public const AUTO_HEADER = '# --- auto: rules - always applied after all other rules, to automatic names only';
+
+    /**
+     * "auto:" rules act after all other rules anyway; move the ones standing above other
+     * rules to the end of the file so the order in the file matches. Returns [text, moved].
+     *
+     * @return array{0: string, 1: int}
+     */
+    public static function autoLast(string $text): array
+    {
+        $lines  = explode("\n", $text);
+        $isRule = static fn (string $l): bool => '' !== trim($l) && !str_starts_with(trim($l), '#');
+        $isAuto = static fn (string $l): bool => 1 === preg_match('/^\s*(?:(?:ausgaben?|expense|einnahmen?|revenue):\s*)?auto:/i', $l);
+        $last   = -1;
+        foreach ($lines as $i => $l) {
+            if ($isRule($l) && !$isAuto($l)) {
+                $last = $i;
+            }
+        }
+        $move = [];
+        foreach ($lines as $i => $l) {
+            if ($i < $last && $isRule($l) && $isAuto($l)) {
+                $move[$i] = $l;
+            }
+        }
+        if ([] === $move) {
+            return [$text, 0];
+        }
+        $rest = array_values(array_diff_key($lines, $move));
+        while ([] !== $rest && '' === trim((string) end($rest))) {
+            array_pop($rest);
+        }
+        if (!in_array(self::AUTO_HEADER, $rest, true)) {
+            array_push($rest, '', self::AUTO_HEADER);
+        }
+        $out = implode("\n", array_merge($rest, array_values($move)))."\n";
+
+        return [$out, count($move)];
+    }
+
     public static function load(?string $file): self
     {
         $r = new self();
