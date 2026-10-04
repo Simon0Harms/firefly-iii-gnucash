@@ -222,6 +222,8 @@ GnuCash has none. The counterparty is derived from the booking text:
    condition). The counterparty may use `$1…$9`, `{category}`, `{description}`; `-` means the
    fallback counterparty. A text rule changes only the bookings whose text it matches – other
    texts with the same IBAN keep their own counterparty; `iban:` moves all bookings of an IBAN.
+   `plan` reports **unused rules** (also in `web.php`): rules that match no booking, and rules
+   whose bookings all get their name from an earlier rule (with the line of that rule).
    A text pattern also matches the purpose of a transfer to someone else
    (`ÜBERWEISUNG 6 SESAM - BÄCKER ERIKA MUSTER; MARTHA BEISPIEL`); `(?![^;]*;)` limits it to
    the name after the last `;`: `/\bErika\s+Muster\b(?![^;]*;)/i => Bäcker Erika Muster`.

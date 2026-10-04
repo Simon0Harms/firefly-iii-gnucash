@@ -293,6 +293,12 @@ foreach ($p3->plans as $pl) {
 }
 check('rule by text', ['REWE', 'REWE'] === $names['REWE Musterstadt'], json_encode($names['REWE Musterstadt'] ?? null));
 check('rule by category', in_array('Finanzamt', $names['Entgeltabrechnung Januar'], true) && in_array('Entgeltabrechnung Januar', $names['Entgeltabrechnung Januar'], true), json_encode($names['Entgeltabrechnung Januar']));
+// unused rules: shadowed by an earlier rule, or matching nothing at all
+$p6     = run($A, $T, ['payee_min_count' => 1], $rules."REWE Musterstadt => Rewe Filiale\nGibtEsNicht4711 => Niemand\nauto:/^zzz-nie/ => -\n");
+$unused = array_column($p6->payees->unusedRules(), null, 'line');
+check('unused rules found', [4, 5, 6] === array_keys($unused) && 0 === $unused[5]['matches'] && true === $unused[6]['auto']
+    && $unused[4]['matches'] > 0 && [1 => $unused[4]['matches']] === $unused[4]['by'], json_encode($unused));
+check('used rules are not reported', [] === array_intersect([1, 2, 3], array_column($p6->payees->unusedRules(), 'line')));
 check('min_count=1 keeps singletons', ['Kiosk', 'Kiosk'] === $names['Kiosk'], json_encode($names['Kiosk']));
 check('a rule does not take over other texts with the same IBAN', 'Bäcker Erika Muster' === ($names['ÜBERWEISUNG 6 SESAM - BÄCKER ERIKA MUSTER; MARTHA BEISPIEL'][0] ?? null)
     && 'MARTHA UND KARL BEISPIEL' === ($names['DAUERAUFTRAG MIETE; MARTHA UND KARL BEISPIEL'][0] ?? null), json_encode([$names['ÜBERWEISUNG 6 SESAM - BÄCKER ERIKA MUSTER; MARTHA BEISPIEL'] ?? null, $names['DAUERAUFTRAG MIETE; MARTHA UND KARL BEISPIEL'] ?? null], JSON_UNESCAPED_UNICODE));

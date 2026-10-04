@@ -1421,6 +1421,12 @@ function textsDe(): array
         'sum.not_imported'=> 'Nicht importiert (gibt es in Firefly nicht): {list}',
         'sum.rules'       => '{rules} Regeln aktiv, {sugg} Vorschläge zum Zusammenfassen',
         'sum.warnings'    => 'Warnungen ({n})',
+        'unused.title'    => 'Überflüssige Regeln ({n}) – sie geben keiner Buchung ihr Gegenkonto',
+        'unused.none'     => 'trifft keine Buchung',
+        'unused.auto'     => 'trifft keinen automatischen Namen',
+        'unused.by'       => 'alle {n} Buchungen bekommen ihr Gegenkonto schon von früheren Regeln: {by}',
+        'unused.by_line'  => 'Zeile {line} ({n})',
+        'unused.note'     => 'Stand der letzten Berechnung.',
         'sum.warn_more'   => '… und {n} weitere',
         'sum.config_msgs' => 'Änderungen an der Kontenzuordnung ({n})',
         'sum.top'         => 'Häufigste Gegenkonten',
@@ -1882,6 +1888,12 @@ function textsEn(): array
         'sum.not_imported'=> 'Not imported (no Firefly equivalent): {list}',
         'sum.rules'       => '{rules} rules active, {sugg} merge suggestions',
         'sum.warnings'    => 'Warnings ({n})',
+        'unused.title'    => 'Unused rules ({n}) – they give no booking its counterparty',
+        'unused.none'     => 'matches no booking',
+        'unused.auto'     => 'matches no automatic name',
+        'unused.by'       => 'all {n} bookings already get their counterparty from earlier rules: {by}',
+        'unused.by_line'  => 'line {line} ({n})',
+        'unused.note'     => 'As of the last calculation.',
         'sum.warn_more'   => '… and {n} more',
         'sum.config_msgs' => 'Changes to the account mapping ({n})',
         'sum.top'         => 'Most used counterparties',
@@ -2465,6 +2477,9 @@ td.text { min-width: 16ch; max-width: 46ch; overflow-wrap: break-word; }
 .badge:empty { display: none; }
 a.ruleref { color: var(--accent, #2563eb); text-decoration: underline dotted; text-underline-offset: 3px; }
 a.ruleref:hover { text-decoration-style: solid; }
+#rules-unused { margin: .5rem 0; }
+#rules-unused ul { margin: .4rem 0 0; padding-left: 1.4rem; max-height: 30vh; overflow: auto; }
+#rules-unused code { font-size: 12px; overflow-wrap: anywhere; }
 #fr-result table td { vertical-align: top; }
 #fr-result td.code { font-family: var(--mono, ui-monospace, monospace); font-size: 12px; overflow-wrap: anywhere; max-width: 60ch; }
 #fr-result .why { color: var(--muted); font-size: 12px; }
@@ -2731,6 +2746,7 @@ footer.foot a { color: var(--muted); }
             <button type="button" class="btn small primary" id="rules-save"><?= $L('ed.save') ?></button>
           </header>
           <div id="rules-error" class="notice bad" hidden></div>
+          <details id="rules-unused" class="notice warn" hidden><summary id="rules-unused-title"></summary><ul class="small"></ul></details>
           <textarea class="code" id="rules-text" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" aria-label="<?= $L('rules.title') ?>"></textarea>
         </div>
         <aside class="card help">
@@ -3022,7 +3038,7 @@ function loadVisible() {
     if (S.sub === 'payees') loadPayees();
     if (S.sub === 'map') loadMap();
     if (S.sub === 'suggestions') loadSugg();
-    if (S.sub === 'rules') loadRules();
+    if (S.sub === 'rules') { loadRules(); renderUnused(); }
     if (S.sub === 'assistant') { if (!S.rules.loaded) loadRules(); if (!S.cfg.loaded) loadConfig(); if (A.dataTime !== S.dataTime && ($('#as-q').value || A.custom)) { A.dataTime = S.dataTime; preview(); } }
   }
   if (S.tab === 'accounts') loadConfig();
@@ -3175,6 +3191,9 @@ function renderSummary(sum, job) {
   if (other.length) facts.push(t('sum.not_imported', {list: other.join(', ')}));
   facts.push(t('sum.rules', {rules: n(cp.rules), sugg: n(cp.suggestions)}));
   kids.push(el('ul', {class: 'facts'}, facts.map(x => el('li', {}, x))));
+  if ((sum.unused_rules || []).length) {
+    kids.push(el('details', {}, el('summary', {}, t('unused.title', {n: n(sum.unused_rules.length)})), el('ul', {class: 'facts small'}, unusedItems(sum.unused_rules))));
+  }
   if ((sum.warnings || []).length) {
     kids.push(el('details', {}, el('summary', {}, t('sum.warnings', {n: n(sum.warnings.length)})),
       el('ul', {class: 'facts small warnlist'}, sum.warnings.map(w => (w.all || []).length > 1
@@ -3681,6 +3700,21 @@ function markDirty() {
   $('#config-dirty').hidden = !S.cfg.dirty;
 }
 function rulesChanged() { S.rules.dirty = $('#rules-text').value !== S.rules.server; markDirty(); }
+function unusedItems(list) {
+  return (list || []).map(u => el('li', {},
+    el('a', {href: '#', class: 'ruleref', title: t('rules.goto_title'), onclick: e => { e.preventDefault(); gotoRule(u.line); }}, t('src.rule_line', {n: u.line})), ': ',
+    el('code', {}, u.src), ' – ',
+    u.matches ? t('unused.by', {n: n(u.matches), by: Object.entries(u.by || {}).map(([l, c]) => t('unused.by_line', {line: l, n: n(c)})).join(', ')})
+      : t(u.auto ? 'unused.auto' : 'unused.none')));
+}
+function renderUnused() {
+  const list = S.st?.summary?.unused_rules || [];
+  const box = $('#rules-unused');
+  box.hidden = !list.length;
+  if (!list.length) return;
+  $('#rules-unused-title').textContent = t('unused.title', {n: n(list.length)});
+  box.querySelector('ul').replaceChildren(...unusedItems(list), el('li', {class: 'muted'}, t('unused.note')));
+}
 async function loadRules(force = false) {
   if ((S.rules.loaded && !force) || S.rules.dirty) return;
   try {

@@ -1286,39 +1286,11 @@ final class PayeeRules
     public function match(string $description, array $ibans, string $category, array $memos, string $side = '', array $accounts = []): ?array
     {
         foreach ($this->rules as $rule) {
-            if (('' !== $rule['side'] && $rule['side'] !== $side) || 'auto' === $rule['field']) {
+            $groups = $this->ruleHit($rule, $description, $ibans, $category, $memos, $side, $accounts);
+            if (null === $groups) {
                 continue;
             }
-            $groups = null;                                  // regex groups of the first condition
-            foreach ($rule['conds'] as $cond) {
-                $subjects = match ($cond['field']) {
-                    'desc'     => [$description],
-                    'category' => [$category],
-                    'memo'     => $memos,
-                    'konto'    => $accounts,
-                    'iban'     => $ibans,
-                };
-                $hit = false;
-                foreach ($subjects as $subject) {
-                    $g = [];
-                    if ('iban' === $cond['field']) {
-                        $hit = $subject === $cond['text'];
-                    } elseif (null !== $cond['regex']) {
-                        $hit = 1 === preg_match($cond['regex'], $subject, $g);
-                    } else {
-                        $hit = str_contains(Util::lower($subject), (string) $cond['text']);
-                    }
-                    if ($hit) {
-                        $groups ??= $g;
-                        break;
-                    }
-                }
-                if (!$hit) {
-                    continue 2;
-                }
-            }
-            $groups ??= [];
-            $payee  = $rule['payee'];
+            $payee = $rule['payee'];
             if ('-' === $payee) {
                 return ['-', $rule['line']];
             }
@@ -1330,6 +1302,62 @@ final class PayeeRules
         }
 
         return null;
+    }
+
+    /**
+     * Lines of ALL rules that match (not only the first) - for the check of unused rules.
+     *
+     * @return list<int>
+     */
+    public function matchAll(string $description, array $ibans, string $category, array $memos, string $side = '', array $accounts = []): array
+    {
+        $lines = [];
+        foreach ($this->rules as $rule) {
+            if (null !== $this->ruleHit($rule, $description, $ibans, $category, $memos, $side, $accounts)) {
+                $lines[] = $rule['line'];
+            }
+        }
+
+        return $lines;
+    }
+
+    /** @return null|array regex groups of the first condition when the rule matches, else null ("auto:" rules never) */
+    private function ruleHit(array $rule, string $description, array $ibans, string $category, array $memos, string $side, array $accounts): ?array
+    {
+        if (('' !== $rule['side'] && $rule['side'] !== $side) || 'auto' === $rule['field']) {
+            return null;
+        }
+        $groups = null;                                  // regex groups of the first condition
+        foreach ($rule['conds'] as $cond) {
+            $subjects = match ($cond['field']) {
+                'desc'     => [$description],
+                'category' => [$category],
+                'memo'     => $memos,
+                'konto'    => $accounts,
+                'iban'     => $ibans,
+            };
+            $hit = false;
+            foreach ($subjects as $subject) {
+                $g = [];
+                if ('iban' === $cond['field']) {
+                    $hit = $subject === $cond['text'];
+                } elseif (null !== $cond['regex']) {
+                    $hit = 1 === preg_match($cond['regex'], $subject, $g);
+                } else {
+                    $hit = str_contains(Util::lower($subject), (string) $cond['text']);
+                }
+                if ($hit) {
+                    $groups ??= $g;
+
+                    break;
+                }
+            }
+            if (!$hit) {
+                return null;
+            }
+        }
+
+        return $groups ?? [];
     }
 
     /**
@@ -2435,6 +2463,57 @@ final class PayeeResolver
         return $this->resolved[$key] ?? throw new \LogicException('payee not resolved: '.$key);
     }
 
+    /**
+     * Rules that give no booking its counterparty: they match nothing, or every booking they
+     * match already gets its name from an earlier rule (by: earlier rule line => bookings).
+     *
+     * @return list<array{line:int, src:string, matches:int, by:array<int, int>}>
+     */
+    public function unusedRules(): array
+    {
+        $used = [];
+        foreach ($this->resolved as $r) {
+            if (1 === preg_match('/^rule:(?:fallback:)?(\d+)$/', $r['source'], $m)) {
+                $used[(int) $m[1]] = true;
+            }
+        }
+        $unused = [];
+        foreach ($this->rules->rules as $rule) {
+            if (!isset($used[$rule['line']])) {
+                $unused[$rule['line']] = $rule;
+            }
+        }
+        if ([] === $unused) {
+            return [];
+        }
+        $matches = [];
+        $by      = [];
+        foreach ($this->usages as $key => $u) {
+            /** @var GTransaction $t */
+            $t     = $u['tx'];
+            $memos = array_values(array_filter(array_map(static fn (GSplit $sp) => $sp->memo, $t->splits), static fn ($m) => '' !== $m));
+            $lines = $this->rules->matchAll($t->description, self::ibansOf($t), $u['category'], $memos, $u['side'], $u['accounts'] ?? []);
+            if ([] === $lines) {
+                continue;
+            }
+            $winner = 1 === preg_match('/^rule:(?:fallback:)?(\d+)$/', $this->resolved[$key]['source'], $m) ? (int) $m[1] : 0;
+            foreach ($lines as $line) {
+                if (isset($unused[$line])) {
+                    $matches[$line][$t->guid]       = true;
+                    $by[$line][$winner][$t->guid]   = true;
+                }
+            }
+        }
+        $out = [];
+        foreach ($unused as $line => $rule) {
+            $b = array_map('count', $by[$line] ?? []);
+            arsort($b);
+            $out[] = ['line' => $line, 'src' => (string) ($rule['src'] ?? ''), 'matches' => count($matches[$line] ?? []), 'by' => $b, 'auto' => 'auto' === $rule['field']];
+        }
+
+        return $out;
+    }
+
     /** @return array<string, array<string, mixed>> */
     public function usages(): array
     {
@@ -3493,6 +3572,7 @@ final class Pipeline
             'counterparties'   => ['expense' => $payeeReport['counts']['expense'] ?? 0, 'revenue' => $payeeReport['counts']['revenue'] ?? 0, 'rules' => count($this->rules->rules),
                 'suggestions' => $sugg['count'], 'top' => array_values(array_map(static fn ($e) => ['name' => $e['name'], 'side' => $e['side'], 'transactions' => count($e['tx'])], $payeeReport['top']))],
             'warnings'         => $warnings,
+            'unused_rules'     => $this->payees->unusedRules(),
             'not_imported'     => $b->otherObjects,
             'selfcheck'        => ['ok' => [] === $this->verifier->errors, 'checked' => $this->verifier->checked, 'errors' => array_slice($this->verifier->errors, 0, 20)],
             'config_messages'  => $this->config->messages,
@@ -3529,6 +3609,12 @@ final class Pipeline
             Out::info(sprintf('Skipped:          %5d  %s', $n, $reason));
         }
         Out::info(sprintf('Counterparties:   %d expense accounts, %d revenue accounts (rules: %s, %d rules)', $payeeReport['counts']['expense'], $payeeReport['counts']['revenue'], $this->rulesFile, count($this->rules->rules)));
+        foreach ($this->payees->unusedRules() as $u) {
+            $why = 0 === $u['matches']
+                ? ($u['auto'] ? 'matches no automatic counterparty name' : 'matches no booking')
+                : sprintf('all %d bookings it matches get their name from earlier rules (%s)', $u['matches'], implode(', ', array_map(static fn ($l, $n) => sprintf('line %d: %d', $l, $n), array_keys($u['by']), $u['by'])));
+            Out::warn(sprintf('unused rule, line %d: %s - %s', $u['line'], Util::truncate($u['src'], 80), $why));
+        }
         $top = array_map(static fn ($e) => sprintf('%s (%d)', $e['name'], count($e['tx'])), $payeeReport['top']);
         Out::info('                  top: '.implode(', ', $top));
         foreach ($st['warnings'] as $examples) {
