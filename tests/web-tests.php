@@ -166,6 +166,15 @@ $r     = $pv(['query' => 'Kiosk', 'target' => mb_strtoupper($name)]);
 check('assistant: existing counterparty is reported (case-insensitive)', $want > 0 && ($r['existing']['expense'] ?? 0) + ($r['existing']['revenue'] ?? 0) === $want, json_encode([$name, $want, $r['existing'] ?? null]));
 $r = $pv(['query' => '', 'target' => '']);
 check('assistant: empty input', '' === ($r['pattern'] ?? 'x') && [] === ($r['matches'] ?? ['x']));
+// an auto: rule of the rules file acts last: a new normal rule beats it (even "after my rules")
+$before = (string) (api('GET', '?a=text&what=rules')['text'] ?? '');
+$autoRow = array_values(array_filter(api('GET', '?a=table&what=map')['rows'] ?? [], static fn ($x) => 'auto' === $x['source']))[0] ?? ['booking_text' => '?', 'payee' => '?'];
+api('POST', '?a=save', ['json' => ['what' => 'rules', 'text' => $before.'auto:/^'.preg_quote((string) $autoRow['payee'], '/')."$/ => -\n"]]);
+waitJob('plan');
+$r = $pv(['rule' => '/^'.preg_quote((string) $autoRow['booking_text'], '/').'$/', 'target' => 'Neuer Name', 'position' => 'end']);
+check('assistant: auto: rules do not keep texts from a new rule', ($r['totals']['bookings'] ?? 0) > 0 && 0 === ($r['totals']['kept'] ?? -1) && $r['totals']['changed'] === $r['totals']['bookings'], json_encode($r['totals'] ?? null));
+api('POST', '?a=save', ['json' => ['what' => 'rules', 'text' => $before]]);
+waitJob('plan');
 
 // ---- account mapping editor
 $c   = api('GET', '?a=text&what=config');

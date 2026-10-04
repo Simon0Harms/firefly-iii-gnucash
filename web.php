@@ -1071,6 +1071,18 @@ function apiRulePreview(Workspace $w): never
         @unlink($tmp);
     }
     $fields = array_column($rules->rules[0]['conds'] ?? [], 'field');
+    // "auto:" rules of the rules file act after all other rules: a new normal rule beats them
+    $autoLines = [];
+    if ($w->has('rules')) {
+        try {
+            foreach (\FireflyGnuCash\PayeeRules::load($w->file('rules'))->rules as $ar) {
+                if ('auto' === $ar['field']) {
+                    $autoLines[$ar['line']] = true;
+                }
+            }
+        } catch (\Throwable) {
+        }
+    }
     if (\in_array('category', $fields, true)) {
         $out['notes'][] = t('asst.note_category');
     }
@@ -1134,7 +1146,7 @@ function apiRulePreview(Workspace $w): never
         if ('' === $target) {
             $new = '';
         }
-        $kept = !$top && str_starts_with((string) $r['source'], 'rule');
+        $kept = !$top && 1 === preg_match('/^rule:(?:fallback:)?(\d+)/', (string) $r['source'], $sm) && !isset($autoLines[(int) $sm[1]]);
         $now  = (string) $r['payee'];
         $to   = $kept ? $now : $new;
         $chg  = '' !== $to && $lower($to) !== $lower($now);
