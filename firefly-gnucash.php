@@ -3430,11 +3430,13 @@ final class Pipeline
                 }
             }
             unset($e);
-            $mk        = $d.'|'.$u['side'];
+            // one row per booking text, side and Firefly counterparty: bookings with the same text
+            // that get another counterparty (e.g. through a konto: rule) stay apart
+            $mk   = substr(md5($d."\x1F".$u['side']."\x1F".$r['name']), 0, 16);
             $map[$mk] ??= ['desc' => $d, 'side' => $u['side'], 'tx' => [], 'payee' => $r['name'], 'source' => $r['source'], 'iban' => implode(' ', $u['ibans'] ?? []), 'cats' => []];
             $map[$mk]['tx'][$t->guid]           = true;
             $map[$mk]['cats'][$u['category']] = true;
-            $details[$mk] ??= ['payee' => $r['name'], 'tx' => [], 'find' => []];
+            $details[$mk] ??= ['payee' => $r['name'], 'side' => $u['side'], 'text' => $d, 'tx' => [], 'find' => []];
             if (!isset($details[$mk]['tx'][$t->guid])) {
                 $details[$mk]['tx'][$t->guid] = $this->detailOf($t);
                 foreach ($details[$mk]['tx'][$t->guid]['splits'] as $sp) {
@@ -3469,9 +3471,9 @@ final class Pipeline
         $summaryFile = $this->base.'.payees.csv';
         file_put_contents($summaryFile, $out);
         uasort($map, static fn ($a, $b) => [count($b['tx']), $a['desc']] <=> [count($a['tx']), $b['desc']]);
-        $out = "\xEF\xBB\xBF".Util::csvLine(['booking_text', 'firefly_type', 'transactions', 'payee', 'source', 'iban', 'categories']);
-        foreach ($map as $e) {
-            $out .= Util::csvLine([$e['desc'], $sideName[$e['side']], count($e['tx']), $e['payee'], $e['source'], $e['iban'], implode(' | ', array_keys($e['cats']))]);
+        $out = "\xEF\xBB\xBF".Util::csvLine(['booking_text', 'firefly_type', 'transactions', 'payee', 'source', 'iban', 'categories', 'key']);
+        foreach ($map as $mk => $e) {
+            $out .= Util::csvLine([$e['desc'], $sideName[$e['side']], count($e['tx']), $e['payee'], $e['source'], $e['iban'], implode(' | ', array_keys($e['cats'])), $mk]);
         }
         $mapFile = $this->base.'.payee-map.csv';
         file_put_contents($mapFile, $out);
@@ -3481,7 +3483,7 @@ final class Pipeline
         foreach ($details as $mk => $d) {
             $tx = array_values($d['tx']);
             usort($tx, static fn ($a, $b) => $b['date'] <=> $a['date']);
-            $json[$mk] = ['payee' => $d['payee'], 'n' => count($tx), 'tx' => array_slice($tx, 0, self::DETAIL_TX),
+            $json[$mk] = ['payee' => $d['payee'], 'side' => $d['side'], 'text' => $d['text'], 'n' => count($tx), 'tx' => array_slice($tx, 0, self::DETAIL_TX),
                 'acc' => array_values(array_unique(array_merge(...array_map(static fn ($x) => array_column($x['splits'], 'account'), $tx)))),
                 'memo' => array_values(array_unique(array_filter(array_merge(...array_map(static fn ($x) => array_column($x['splits'], 'memo'), $tx)), static fn ($m) => '' !== $m))),
                 'ibans' => array_values(array_unique(array_merge(...array_map(static fn ($x) => $x['ibans'], $tx)))),

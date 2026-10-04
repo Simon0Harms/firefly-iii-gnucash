@@ -267,6 +267,12 @@ $csv = static function (Pipeline $p): string {
     return (string) file_get_contents($p->base.'.payees.csv').(string) file_get_contents($p->base.'.payee-map.csv');
 };
 check('date range: payee reports cover the whole book', $csv($p5) === $csv($p4));
+// booking-text rows are split by counterparty; details use the row key
+$rowsCsv = array_map(static fn ($l) => str_getcsv($l, ';'), array_slice(explode("\n", trim(ltrim((string) file_get_contents($p5->base.'.payee-map.csv'), "\xEF\xBB\xBF"))), 1));
+$keys    = array_column($rowsCsv, 7);
+$det     = json_decode((string) file_get_contents($p5->base.'.payee-details.json'), true);
+check('payee map: one key per row, details by key', count($keys) === count(array_unique($keys)) && [] === array_diff($keys, array_keys($det))
+    && [] === array_filter($rowsCsv, static fn ($r) => $det[$r[7]]['text'] !== $r[0] || $det[$r[7]]['payee'] !== $r[3]), json_encode(array_slice($rowsCsv, 0, 2)));
 
 // ---- no multisource (upstream Firefly): separate groups per source account
 $p2 = run($A, $T, ['multisource' => false]);

@@ -250,7 +250,8 @@ GnuCash has none. The counterparty is derived from the booking text:
    the fallback `payee_fallback` (default `(diverse)`; `{category}` is also possible).
 
 `plan` writes the result to `*.payees.csv` (one row per counterparty) and `*.payee-map.csv`
-(one row per booking text), both open in LibreOffice/Excel, and proposes merge rules in
+(one row per booking text and counterparty – the same text can get different counterparties,
+e.g. through a `konto:` rule), both open in LibreOffice/Excel, and proposes merge rules in
 `*.payee-suggestions.txt` – by first word (`REWE Musterstadt`, `Rewe - Musterstadt`, `REWE Kartenwelt`
 → `REWE`) and by two shared words (`Bäckerei Erika Muster Bäckerwagen` → `Bäcker Erika Muster` via
 `/\bErika\s+Muster\b/i`).

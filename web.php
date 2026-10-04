@@ -1095,11 +1095,15 @@ function apiRulePreview(Workspace $w): never
     $accOf  = [];
     $memoOf = [];
     $ibanOf = [];
+    $txOf   = [];
     if (([] !== array_intersect(['konto', 'memo', 'iban'], $fields)) && $w->has('details')) {
         foreach ((array) json_decode((string) file_get_contents($w->file('details')), true) as $k => $d) {
             $accOf[$k]  = (array) ($d['acc'] ?? []);
             $memoOf[$k] = (array) ($d['memo'] ?? []);
             $ibanOf[$k] = (array) ($d['ibans'] ?? []);   // incl. settlement IBANs the report column hides
+            if ((int) ($d['n'] ?? 0) === \count((array) ($d['tx'] ?? []))) {
+                $txOf[$k] = (array) $d['tx'];            // all bookings of the row: check them one by one
+            }
         }
     }
     $opts     = bookOptions($w);
@@ -1115,28 +1119,49 @@ function apiRulePreview(Workspace $w): never
         $text  = (string) $r['booking_text'];
         $cats  = '' === (string) $r['categories'] ? [''] : explode(' | ', (string) $r['categories']);
         $ibans = array_values(array_filter(explode(' ', (string) $r['iban'])));
-        $sdx   = sideOfRow($r);
-        if (isset($ibanOf[$r['booking_text'].'|'.$sdx])) {
-            $ibans = $ibanOf[$r['booking_text'].'|'.$sdx];
-        }
-        $hit   = null;
         $sd    = $side((string) $r['firefly_type']);
+        $key   = (string) ($r['key'] ?? '') ?: $text.'|'.$sd;     // row id in book.payee-details.json
+        if (isset($ibanOf[$key])) {
+            $ibans = $ibanOf[$key];
+        }
+        $accts = $accOf[$key] ?? [];
+        $hit   = null;
         if (\in_array('auto', $fields, true)) {
             // "auto:" rules only see automatically named counterparties
             $hit = 'auto' === (string) $r['source'] ? $rules->matchAuto((string) $r['payee'], $sd) : null;
+        } elseif (isset($txOf[$key])) {
+            // konto:/memo:/iban: rules per booking: a row can hold bookings on different accounts
+            $n = 0;
+            foreach ($txOf[$key] as $tx) {
+                $txAcc  = array_values(array_unique(array_column((array) ($tx['splits'] ?? []), 'account')));
+                $txMemo = array_values(array_filter(array_column((array) ($tx['splits'] ?? []), 'memo'), static fn ($m) => '' !== $m));
+                foreach ($cats as $c) {
+                    if (null !== ($h = $rules->match($text, (array) ($tx['ibans'] ?? []), $c, $txMemo, $sd, $txAcc))) {
+                        $hit ??= $h;
+                        ++$n;
+
+                        break;
+                    }
+                }
+            }
+            $partial = $n;
         } else {
             foreach ($cats as $c) {
-                if (null !== ($hit = $rules->match($text, $ibans, $c, $memoOf[$text.'|'.$sd] ?? [], $sd, $accOf[$text.'|'.$sd] ?? []))) {
+                if (null !== ($hit = $rules->match($text, $ibans, $c, $memoOf[$key] ?? [], $sd, $accts))) {
                     break;
                 }
             }
         }
         $count = (int) $r['transactions'];
+        if (isset($partial)) {
+            $count = $partial;
+            unset($partial);
+        }
         if (null === $hit) {
             if ([] !== $tokens && \count($similar) < 60) {
                 $lt = $lower($text);
                 if ([] === array_filter($tokens, static fn ($x) => !str_contains($lt, $x))) {
-                    $similar[] = ['text' => $text, 'side' => $sd, 'count' => $count, 'payee' => (string) $r['payee']];
+                    $similar[] = ['text' => $text, 'side' => $sd, 'key' => $key, 'count' => $count, 'payee' => (string) $r['payee']];
                 }
             }
 
@@ -1150,7 +1175,7 @@ function apiRulePreview(Workspace $w): never
         $now  = (string) $r['payee'];
         $to   = $kept ? $now : $new;
         $chg  = '' !== $to && $lower($to) !== $lower($now);
-        $matches[] = ['text' => $text, 'side' => $sd, 'count' => $count, 'payee' => $now, 'source' => (string) $r['source'], 'new' => $to, 'kept' => $kept, 'changes' => $chg];
+        $matches[] = ['text' => $text, 'side' => $sd, 'key' => $key, 'count' => $count, 'payee' => $now, 'source' => (string) $r['source'], 'new' => $to, 'kept' => $kept, 'changes' => $chg];
         $out['totals']['texts']++;
         $out['totals']['bookings'] += $count;
         if ($kept) {
@@ -3375,7 +3400,7 @@ const payeeGrid = new Grid('payees', [
     onRow: r => { S.mapPayee = {name: r.payee, side: r.side}; showSub('map'); renderMapFilter(); mapGrid.render(); }});
 
 const mapGrid = new Grid('map', [
-  {key: 'booking_text', label: t('col.text'), cls: 'text', render: r => hov(r.booking_text, r.side)},
+  {key: 'booking_text', label: t('col.text'), cls: 'text', render: r => hov(r.booking_text, r.side, r.key)},
   {key: 'side', label: t('col.side'), text: r => t('kind.' + r.side)},
   {key: 'transactions', label: t('col.count'), num: true, text: r => n(r.transactions), sortv: r => r.transactions},
   {key: 'payee', label: t('col.payee'), cls: 'text'},
@@ -3433,24 +3458,23 @@ function loadDetails() {
 function addDetailSearch(det) {
   if (!det) return;
   if (Array.isArray(S.map)) {
-    for (const r of S.map) { const d = det[r.booking_text + '|' + r.side]; r._x = d ? d.find : ''; }
+    for (const r of S.map) { const d = det[r.key || r.booking_text + '|' + r.side]; r._x = d ? d.find : ''; }
     mapGrid.reindex();
   }
   if (Array.isArray(S.payees)) {
     const by = {};
-    for (const [k, d] of Object.entries(det)) {
-      const side = k.slice(k.lastIndexOf('|') + 1);
-      const key = d.payee + '|' + side;
-      (by[key] ??= []).push(k.slice(0, k.lastIndexOf('|')), d.find);
+    for (const d of Object.values(det)) {
+      const key = d.payee + '|' + d.side;
+      (by[key] ??= []).push(d.text, d.find);
     }
     for (const r of S.payees) r._x = (by[r.payee + '|' + r.side] || []).join('\u0001');
     payeeGrid.reindex();
   }
 }
-const hov = (text, side) => el('span', {class: 'hov', tabindex: '0', 'data-text': text, 'data-side': side}, text);
+const hov = (text, side, key) => el('span', {class: 'hov', tabindex: '0', 'data-text': text, 'data-side': side, 'data-key': key || text + '|' + side}, text);
 const money = (a, cur) => { const v = Number(a); return (Number.isFinite(v) ? v.toLocaleString(locale, {minimumFractionDigits: 2, maximumFractionDigits: 4}) : a) + ' ' + cur; };
-function detailBox(text, side, det) {
-  const d = det && det[text + '|' + side];
+function detailBox(key, side, det) {
+  const d = det && det[key];
   if (!d) return [el('div', {class: 'muted'}, det ? t('det.none') : t('det.loading'))];
   const out = [el('div', {class: 'tip-h'}, tn('det.head', d.n, {n: n(d.n), payee: d.payee}), ' ', el('span', {class: 'badge'}, t('kind.' + side)))];
   for (const x of d.tx) {
@@ -3499,7 +3523,7 @@ function placeTip(a) {
 }
 function showTip(a) {
   tipFor = a;
-  const fill = det => { if (tipFor !== a) return; tip.replaceChildren(...detailBox(a.dataset.text, a.dataset.side, det)); tip.hidden = false; placeTip(a); };
+  const fill = det => { if (tipFor !== a) return; tip.replaceChildren(...detailBox(a.dataset.key, a.dataset.side, det)); tip.hidden = false; placeTip(a); };
   fill(S.det && !(S.det instanceof Promise) ? S.det : null);
   if (!S.det || S.det instanceof Promise) loadDetails().then(fill);
   a.setAttribute('aria-describedby', 'tip');
@@ -3663,7 +3687,7 @@ function renderAssistant(d) {
   $('#as-n').textContent = tot.texts ? n(tot.texts) : '';
   const head = el('tr', {}, [t('col.text'), t('col.side'), t('col.count'), t('asst.col_now'), '', t('asst.col_new')].map((x, i) => el('th', {class: i === 2 ? 'num' : ''}, x)));
   $('#as-table').replaceChildren(el('thead', {}, head), el('tbody', {}, (d.matches || []).map(m => el('tr', {class: m.changes ? '' : 'same'},
-    el('td', {class: 'text'}, hov(m.text, m.side)), el('td', {}, t('kind.' + m.side)), el('td', {class: 'num'}, n(m.count)),
+    el('td', {class: 'text'}, hov(m.text, m.side, m.key)), el('td', {}, t('kind.' + m.side)), el('td', {class: 'num'}, n(m.count)),
     el('td', {class: 'text'}, m.payee, ' ', el('span', {class: 'muted small'}, srcCell(m.source))), el('td', {class: 'arrow'}, '→'),
     el('td', {class: 'text new'}, m.kept ? [m.payee, ' ', el('span', {class: 'badge warn'}, t('asst.kept_badge'))] : (m.new || '?'))))));
   $('#as-more').hidden = !d.more;
@@ -3671,7 +3695,7 @@ function renderAssistant(d) {
   const sim = d.similar || [];
   $('#as-similar-box').hidden = !sim.length;
   $('#as-similar').replaceChildren(el('thead', {}, el('tr', {}, [t('col.text'), t('col.side'), t('col.count'), t('col.payee')].map((x, i) => el('th', {class: i === 2 ? 'num' : ''}, x)))),
-    el('tbody', {}, sim.map(m => el('tr', {}, el('td', {class: 'text'}, hov(m.text, m.side)), el('td', {}, t('kind.' + m.side)), el('td', {class: 'num'}, n(m.count)), el('td', {class: 'text'}, m.payee)))));
+    el('tbody', {}, sim.map(m => el('tr', {}, el('td', {class: 'text'}, hov(m.text, m.side, m.key)), el('td', {}, t('kind.' + m.side)), el('td', {class: 'num'}, n(m.count)), el('td', {class: 'text'}, m.payee)))));
 }
 /** Inserts a rule line after all rules or before the first one (and its comment block). */
 function insertRule(line, position) {
