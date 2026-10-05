@@ -1681,6 +1681,7 @@ function textsDe(): array
         'opt.opening_balances'    => 'Anfangssalden',
         'opt.clearing_account'    => 'Umbuchungskonto',
         'opt.import_tag'          => 'Import-Tag',
+        'opt.selfflow_tag'        => 'Durchlauf-Tag',
         'opt.multisource'         => 'Mehrere Quellkonten',
         'opt.apply_rules'         => 'Firefly-Regeln ausführen',
         'opt.fire_webhooks'       => 'Webhooks auslösen',
@@ -1695,6 +1696,7 @@ function textsDe(): array
         'optd.opening_balances'   => 'Erste Eigenkapital-Buchung eines Kontos wird Anfangssaldo in Firefly.',
         'optd.clearing_account'   => 'Technisches Konto für Umbuchungen zwischen Einnahmen und Ausgaben.',
         'optd.import_tag'         => 'Tag an jeder importierten Buchung; das Löschen nutzt ihn.',
+        'optd.selfflow_tag'       => 'Zusätzlicher Tag, wenn Geld innerhalb einer Buchung von einem Konto auf dasselbe Konto fließt: daraus werden zwei verknüpfte Buchungen über das Umbuchungskonto.',
         'optd.multisource'        => 'Split-Buchungen mit mehreren Quellkonten als eine Buchung (braucht den Multisource-Fork).',
         'optd.apply_rules'        => 'Firefly-Regeln beim Import anwenden.',
         'optd.fire_webhooks'      => 'Webhooks beim Import auslösen.',
@@ -2133,6 +2135,7 @@ function textsEn(): array
         'opt.opening_balances'    => 'Opening balances',
         'opt.clearing_account'    => 'Clearing account',
         'opt.import_tag'          => 'Import tag',
+        'opt.selfflow_tag'        => 'Pass-through tag',
         'opt.multisource'         => 'Several source accounts',
         'opt.apply_rules'         => 'Run Firefly rules',
         'opt.fire_webhooks'       => 'Fire webhooks',
@@ -2147,6 +2150,7 @@ function textsEn(): array
         'optd.opening_balances'   => 'The first equity transaction of an account becomes its Firefly opening balance.',
         'optd.clearing_account'   => 'Technical account for re-bookings between income and expenses.',
         'optd.import_tag'         => 'Tag on every imported transaction; deleting uses it.',
+        'optd.selfflow_tag'       => 'Extra tag when money moves from an account to the same account within one transaction: it becomes two linked transactions via the clearing account.',
         'optd.multisource'        => 'Split transactions with several source accounts as one transaction (needs the multisource fork).',
         'optd.apply_rules'        => 'Apply Firefly rules during the import.',
         'optd.fire_webhooks'      => 'Fire webhooks during the import.',
@@ -3796,7 +3800,7 @@ const ROLES = ['defaultAsset', 'savingAsset', 'sharedAsset', 'cashWalletAsset', 
 const OPTS = [
   ['payee_min_count', 'number'], ['payee_fallback', 'text'], ['payee_split_dash', 'bool'], ['payee_merge_prefix', 'bool'],
   ['payee_group_by_iban', 'bool'], ['payee_set_iban', 'bool'], ['category_names', ['strip-root', 'full-path']], ['reconciled_states', 'text'],
-  ['opening_balances', 'bool'], ['clearing_account', 'text'], ['import_tag', 'text'], ['multisource', 'bool'], ['apply_rules', 'bool'], ['fire_webhooks', 'bool'],
+  ['opening_balances', 'bool'], ['clearing_account', 'text'], ['import_tag', 'text'], ['selfflow_tag', 'text'], ['multisource', 'bool'], ['apply_rules', 'bool'], ['fire_webhooks', 'bool'],
 ];
 const clone = o => JSON.parse(JSON.stringify(o));
 

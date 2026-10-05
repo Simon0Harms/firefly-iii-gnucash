@@ -291,6 +291,13 @@ Not imported (no Firefly equivalent): budgets, scheduled transactions, invoices/
 vendors, prices, lots, split actions, online-banking settings, GnuCash import match data.
 Transactions whose amounts are all zero are skipped; zero-amount splits are kept as memo lines.
 
+**Money moved from an account to itself** (e.g. a card charged +50.00 and −6.12 within one GnuCash
+transaction): Firefly cannot book an account against itself. Such a part becomes two transactions
+via the clearing account (`account → GnuCash-Umbuchungen` and `GnuCash-Umbuchungen → account`), both
+with the extra tag `GnuCash-Durchlauf` (option `selfflow_tag`), the same external ID and a Firefly
+link of type "Related". The balances are unchanged, the clearing account nets to zero, and
+`export` merges them back into the original GnuCash transaction.
+
 ### Re-running
 
 The import is idempotent: transactions whose GUID already exists in Firefly with all their
@@ -397,6 +404,7 @@ transaction may be combined.
 | `opening_balances` | `true` | first equity transaction of an asset account → Firefly opening balance |
 | `clearing_account` | `GnuCash-Umbuchungen` | technical account for income ↔ expense re-bookings |
 | `import_tag` | `GnuCash-Import` | tag on every imported transaction (`purge` uses it) |
+| `selfflow_tag` | `GnuCash-Durchlauf` | extra tag on the two linked transactions of money moved from an account to itself |
 | `multisource` | `true` | one split transaction with several source accounts (needs the multisource fork) |
 | `apply_rules`, `fire_webhooks` | `false` | Firefly rules / webhooks during the import |
 

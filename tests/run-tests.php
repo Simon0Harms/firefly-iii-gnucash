@@ -237,7 +237,9 @@ check('DEM -> EUR transfer (trading accounts)', 'transfer(DM>Bargeld 20.00DEM/10
 check('DEM purchase, EUR expense account', 'withdrawal(DM>@(diverse) 42.44DEM/21.70EUR [Lebensmittel])' === $s(12), $s(12));
 check('zero transaction skipped', null !== $plans[13]->skip);
 check('zero split kept as memo', str_contains(journals($plans[14])[0]->notes, 'GnuCash-Memo [Kategorie: Lebensmittel 0.00]: Ketchup'), journals($plans[14])[0]->notes);
-check('same account on both sides', 'withdrawal(Gutscheine>@(diverse) 11.04EUR [Lebensmittel]) + transfer(Gutscheine>Girokonto 151.60EUR)' === $s(15), $s(15));
+check('same account on both sides: two linked transactions via clearing', 'withdrawal(Gutscheine>@(diverse) 11.04EUR [Lebensmittel]) + transfer(Gutscheine>Girokonto 151.60EUR) + transfer(Gutscheine>CLR 3.76EUR) + transfer(CLR>Gutscheine 3.76EUR)' === $s(15), $s(15));
+check('self transfer: halves marked, no drop warning', [false, false, true, true] === array_map(static fn ($g) => $g->self, $plans[15]->groups)
+    && $plans[15]->usesClearing && 1 === count($plans[15]->selfNotes) && [] === array_filter($plans[15]->warnings, static fn ($w) => str_contains($w, 'dropped')), implode('; ', $plans[15]->warnings));
 check('refund of an expense', 'deposit(@(diverse)>Girokonto 19.99EUR [Aufwendungen:Geschenke])' === $s(16) && str_starts_with(journals($plans[16])[0]->notes, 'Notiz zur Buchung'), $s(16));
 check('income category', 'deposit(@Geschenk von Oma>Bargeld 50.00EUR [Erträge:Geschenke])' === $s(17) || 'deposit(@(diverse)>Bargeld 50.00EUR [Erträge:Geschenke])' === $s(17), $s(17));
 check('proportional DEM/EUR allocation', 'withdrawal(DM>@(diverse) 1.00DEM/0.51EUR [Lebensmittel], DM>@(diverse) 1.00DEM/0.51EUR [Lebensmittel:Getränke], DM>@(diverse) 1.00DEM/0.52EUR [Lebensmittel:Leergut])' === $s(18), $s(18));

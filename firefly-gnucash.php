@@ -838,6 +838,7 @@ final class ImportConfig
         'opening_balances'    => true,
         'clearing_account'    => 'GnuCash-Umbuchungen',
         'import_tag'          => 'GnuCash-Import',
+        'selfflow_tag'        => 'GnuCash-Durchlauf',
         'payee_min_count'     => 2,
         'payee_fallback'      => '(diverse)',
         'payee_split_dash'    => true,
@@ -2601,11 +2602,17 @@ final class Journal
 
     /** @var list<int> indices of the GnuCash splits this journal came from */
     public array $splits       = [];
+
+    /** part of a transfer of an account to itself, booked as two transactions via the clearing account */
+    public bool $self          = false;
 }
 
 final class Group
 {
     public ?string $title = null;
+
+    /** half of a transfer of an account to itself (see Journal::$self) */
+    public bool $self     = false;
 
     /** @var list<Journal> */
     public array $journals = [];
@@ -2624,6 +2631,9 @@ final class TxPlan
     /** @var list<string> */
     public array $warnings   = [];
     public bool $usesClearing = false;
+
+    /** @var list<string> transfers of an account to itself, booked via the clearing account */
+    public array $selfNotes  = [];
 
     /** @var list<int> splits that could not be imported (quantity without value) */
     public array $dropped    = [];
@@ -2941,22 +2951,54 @@ final class Decomposer
         $pair($plDst, $bsSrc, true, false);   // expenses (and income reversals) paid from asset/liability accounts
         $pair($plSrc, $bsDst, false, false);  // income (and refunds) received on asset/liability accounts
         $pair($bsDst, $bsSrc, true, true);    // transfers between asset/liability accounts
-        $left     = 0;
-        $leftAcct = [];
-        foreach ($srcCap as $i => $c) {
-            if ($c > 0) {
-                if (!$isBsNode($i)) {
-                    $plan->skip = 'internal error: unpaired income/expense split';
+        // the pivot's virtual extra capacity that was not needed
+        if (null !== $pivot && $extra > 0) {
+            $virt             = min($srcCap[$pivot], $dstCap[$pivot], $extra);
+            $srcCap[$pivot] -= $virt;
+            $dstCap[$pivot] -= $virt;
+        }
+        // what is left moves money from an account to itself (e.g. +50 and -6.12 on the same
+        // card): book it as two transactions via the clearing account, linked by tag and link
+        $selfOut = [];
+        $selfIn  = [];
+        foreach ($order as $i) {
+            if (($srcCap[$i] ?? 0) <= 0 && ($dstCap[$i] ?? 0) <= 0) {
+                continue;
+            }
+            if (!$isBsNode($i) || 'C' === $i) {
+                $plan->skip = 'internal error: unpaired split';
 
-                    return $plan;
-                }
-                $left += $c;
-                $a     = $acctOf($i);
-                $leftAcct[$a] = '#clearing' === $a ? $this->clearingName : $this->book->account($a)->path;
+                return $plan;
+            }
+            if ($srcCap[$i] > 0) {
+                $selfOut[$i] = $srcCap[$i];
+            }
+            if ($dstCap[$i] > 0) {
+                $selfIn[$i] = $dstCap[$i];
             }
         }
-        if ($left > 0) {
-            $plan->warnings[] = sprintf('%s %s moved from an account to itself (%s) - dropped', Util::minorToDec($left, $txDec), $t->currency, implode(', ', $leftAcct));
+        $selfFlows = [];
+        if (array_sum($selfOut) !== array_sum($selfIn)) {
+            $plan->skip = 'internal error: unbalanced transfer to itself';
+
+            return $plan;
+        }
+        if ([] !== $selfOut) {
+            $names = [];
+            foreach ($selfOut + $selfIn as $i => $c) {
+                $names[$acctOf($i)] = $this->book->account($acctOf($i))->path;
+            }
+            foreach ($selfOut as $i => $c) {
+                $selfFlows[count($flows)] = true;
+                $flows[]                  = [$i, 'C', $c];
+            }
+            foreach ($selfIn as $i => $c) {
+                $selfFlows[count($flows)] = true;
+                $flows[]                  = ['C', $i, $c];
+            }
+            $plan->usesClearing = true;
+            $plan->selfNotes[]  = sprintf('%s %s moved from an account to itself (%s) - booked as two linked transactions via %s',
+                Util::minorToDec(array_sum($selfOut), $txDec), $t->currency, implode(', ', $names), $this->clearingName);
         }
         if ([] === $flows) {
             $plan->skip = 'nothing left to import';
@@ -3076,6 +3118,7 @@ final class Decomposer
                 continue;
             }
             $j->splits = array_values(array_filter([$from, $to], static fn ($i) => 'C' !== $i));
+            $j->self   = isset($selfFlows[$k]);
             $recon     = true;
             foreach ($j->splits as $i) {
                 $state = $sp[$i]['s']->state;
@@ -3091,12 +3134,13 @@ final class Decomposer
         // accounts), all deposits together, transfers per account pair
         $groups = [];
         foreach ($journals as $j) {
-            $key = match ($j->type) {
+            $key = $j->self ? 's|'.$j->type.'|'.implode(':', $j->src).'|'.implode(':', $j->dst) : match ($j->type) {
                 'withdrawal' => 'w'.($this->multisource ? '' : '|'.implode(':', $j->src)),
                 'deposit'    => 'd'.($this->multisource ? '' : '|'.implode(':', $j->dst)),
                 default      => 't|'.implode(':', $j->src).'|'.implode(':', $j->dst),
             };
             $groups[$key] ??= new Group($j->type);
+            $groups[$key]->self       = $j->self;
             $groups[$key]->journals[] = $j;
         }
 
@@ -3323,7 +3367,7 @@ final class Pipeline
     public function stats(): array
     {
         $s = ['tx' => 0, 'skipped' => [], 'groups' => ['withdrawal' => 0, 'deposit' => 0, 'transfer' => 0], 'journals' => 0,
-            'multisource' => 0, 'clearing' => 0, 'warnings' => [], 'dates' => [null, null]];
+            'multisource' => 0, 'clearing' => 0, 'selfflow' => 0, 'selfflows' => [], 'warnings' => [], 'dates' => [null, null]];
         foreach ($this->plans as $p) {
             if (null !== $p->skip) {
                 $reason                  = (string) preg_replace('/"[^"]*"/', '"…"', $p->skip);
@@ -3347,7 +3391,12 @@ final class Pipeline
                     ++$s['multisource'];
                 }
             }
-            if ($p->usesClearing) {
+            if ([] !== $p->selfNotes) {
+                ++$s['selfflow'];
+                foreach ($p->selfNotes as $n) {
+                    $s['selfflows'][] = sprintf('%s %s: %s', $p->tx->date, Util::truncate($p->tx->description, 40), $n);
+                }
+            } elseif ($p->usesClearing) {
                 ++$s['clearing'];
             }
             foreach ($p->warnings as $w) {
@@ -3608,7 +3657,7 @@ final class Pipeline
             'book'             => ['accounts' => count($b->accounts), 'transactions' => count($b->transactions), 'currency' => $b->defaultCurrency,
                 'first' => $b->transactions[0]->date ?? null, 'last' => [] === $b->transactions ? null : end($b->transactions)->date],
             'mapping'          => $used,
-            'importable'       => ['transactions' => $st['tx'], 'journals' => $st['journals'], 'multisource' => $st['multisource'], 'clearing' => $st['clearing']] + $st['groups'],
+            'importable'       => ['transactions' => $st['tx'], 'journals' => $st['journals'], 'multisource' => $st['multisource'], 'clearing' => $st['clearing'], 'selfflow' => $st['selfflow']] + $st['groups'],
             'opening_balances' => count($this->dec->openingBalance),
             'skipped'          => $st['skipped'],
             'counterparties'   => ['expense' => $payeeReport['counts']['expense'] ?? 0, 'revenue' => $payeeReport['counts']['revenue'] ?? 0, 'rules' => count($this->rules->rules),
@@ -3643,6 +3692,13 @@ final class Pipeline
         }
         if ($st['clearing'] > 0) {
             Out::info(sprintf('                  %d transactions without asset account are booked via "%s"', $st['clearing'], $this->config->opt('clearing_account')));
+        }
+        if ($st['selfflow'] > 0) {
+            Out::info(sprintf('                  %d transactions move money from an account to itself: booked as two transactions via "%s", tagged "%s" and linked',
+                $st['selfflow'], $this->config->opt('clearing_account'), $this->config->opt('selfflow_tag')));
+            foreach (array_slice($st['selfflows'], 0, Out::$verbose ? 1000 : 3) as $n) {
+                Out::info('                    '.$n);
+            }
         }
         if ([] !== $this->dec->openingBalance) {
             Out::info(sprintf('Opening balances: %d accounts', count($this->dec->openingBalance)));
@@ -4564,8 +4620,9 @@ final class Importer
             if ('' !== $j->notes) {
                 $row['notes'] = $j->notes;
             }
-            if ('' !== $tag) {
-                $row['tags'] = [$tag];
+            $tags = array_values(array_filter([$tag, $g->self ? (string) $this->p->config->opt('selfflow_tag') : ''], static fn ($x) => '' !== $x));
+            if ([] !== $tags) {
+                $row['tags'] = $tags;
             }
             if ('' !== $plan->tx->num) {
                 $row['internal_reference'] = Util::truncate($plan->tx->num, 255);
@@ -4649,18 +4706,55 @@ final class Importer
     private function postGroups(TxPlan $plan): array
     {
         $created = [];
+        $self    = [];
         foreach ($plan->groups as $g) {
             try {
                 $res       = $this->api->post('transactions', $this->payload($plan, $g));
                 $created[] = (int) $res['data']['id'];
+                if ($g->self) {
+                    $self[] = (int) ($res['data']['attributes']['transactions'][0]['transaction_journal_id'] ?? 0);
+                }
             } catch (ApiError $e) {
                 $this->rollback($created);
 
                 return [[], $e];
             }
         }
+        // the two halves of a transfer of an account to itself: link them ("Related")
+        for ($k = 1; $k < count($self); ++$k) {
+            try {
+                if (null !== ($lt = $this->relatedLinkType()) && $self[0] > 0 && $self[$k] > 0) {
+                    $this->api->post('transaction-links', ['link_type_id' => $lt, 'outward_id' => $self[0], 'inward_id' => $self[$k],
+                        'notes' => 'GnuCash '.$plan->tx->guid]);
+                }
+            } catch (ApiError $e) {
+                Out::warn(sprintf('%s "%s": transactions not linked: %s', $plan->tx->date, Util::truncate($plan->tx->description, 60), $e->details()));
+            }
+        }
 
         return [$created, null];
+    }
+
+    private string|false|null $linkType = null;
+
+    /** id of the Firefly link type "Related" (null if missing) */
+    private function relatedLinkType(): ?string
+    {
+        if (null === $this->linkType) {
+            $this->linkType = false;
+            foreach ($this->api->all('link-types') as $lt) {
+                if ('related' === Util::lower((string) ($lt['attributes']['name'] ?? ''))) {
+                    $this->linkType = (string) $lt['id'];
+
+                    break;
+                }
+            }
+            if (false === $this->linkType) {
+                Out::warn('Firefly has no link type "Related" - transfers of an account to itself are tagged but not linked');
+            }
+        }
+
+        return false === $this->linkType ? null : $this->linkType;
     }
 
     /** @param list<int> $ids */
@@ -5100,7 +5194,7 @@ final class Exporter
                 $notes .= ('' === $notes ? '' : "\n\n").$plainText;
             }
             foreach ((array) ($j['tags'] ?? []) as $t) {
-                if ('GnuCash-Import' !== $t) {
+                if (!in_array($t, ['GnuCash-Import', 'GnuCash-Durchlauf'], true)) {
                     $tags[$t] = true;
                 }
             }
