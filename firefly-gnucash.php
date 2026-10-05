@@ -3372,6 +3372,7 @@ final class Pipeline
             if (null !== $p->skip) {
                 $reason                  = (string) preg_replace('/"[^"]*"/', '"…"', $p->skip);
                 $s['skipped'][$reason]   = ($s['skipped'][$reason] ?? 0) + 1;
+                $s['skippedTx'][$reason][] = $this->txLine($p->tx);
 
                 continue;
             }
@@ -3406,6 +3407,22 @@ final class Pipeline
         }
 
         return $s;
+    }
+
+    /** "date description: account amount, ..." for lists of skipped transactions */
+    private function txLine(GTransaction $t): string
+    {
+        $parts = [];
+        foreach (array_slice($t->splits, 0, 6) as $sp) {
+            [$num, $den] = array_map('intval', explode('/', $sp->value.'/1'));
+            $acc         = $this->book->accounts[$sp->account] ?? null;
+            $parts[]     = sprintf('%s %+.2f', null === $acc ? '?' : $acc->path, 0 === $den ? 0 : $num / $den);
+        }
+        if (count($t->splits) > 6) {
+            $parts[] = sprintf('… (%d splits)', count($t->splits));
+        }
+
+        return sprintf('%s %s: %s', $t->date, Util::truncate(Util::oneLine($t->description), 60), implode(', ', $parts));
     }
 
     public function writeRulesTemplate(): bool
@@ -3660,6 +3677,8 @@ final class Pipeline
             'importable'       => ['transactions' => $st['tx'], 'journals' => $st['journals'], 'multisource' => $st['multisource'], 'clearing' => $st['clearing'], 'selfflow' => $st['selfflow']] + $st['groups'],
             'opening_balances' => count($this->dec->openingBalance),
             'skipped'          => $st['skipped'],
+            'skipped_tx'       => array_map(static fn ($l) => array_slice($l, 0, 1000), $st['skippedTx'] ?? []),
+            'selfflows'        => array_slice($st['selfflows'], 0, 1000),
             'counterparties'   => ['expense' => $payeeReport['counts']['expense'] ?? 0, 'revenue' => $payeeReport['counts']['revenue'] ?? 0, 'rules' => count($this->rules->rules),
                 'suggestions' => $sugg['count'], 'top' => array_values(array_map(static fn ($e) => ['name' => $e['name'], 'side' => $e['side'], 'transactions' => count($e['tx'])], $payeeReport['top']))],
             'warnings'         => $warnings,
@@ -3705,6 +3724,11 @@ final class Pipeline
         }
         foreach ($st['skipped'] as $reason => $n) {
             Out::info(sprintf('Skipped:          %5d  %s', $n, $reason));
+            if (Out::$verbose) {
+                foreach ($st['skippedTx'][$reason] ?? [] as $l) {
+                    Out::info('                    '.$l);
+                }
+            }
         }
         Out::info(sprintf('Counterparties:   %d expense accounts, %d revenue accounts (rules: %s, %d rules)', $payeeReport['counts']['expense'], $payeeReport['counts']['revenue'], $this->rulesFile, count($this->rules->rules)));
         foreach ($this->payees->unusedRules() as $u) {

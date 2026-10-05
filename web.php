@@ -1458,6 +1458,7 @@ function textsDe(): array
         'sum.mapping'     => 'Zuordnung: {asset} Bestandskonten, {liability} Verbindlichkeiten, {category} Kategorien mit Buchungen',
         'sum.multisource' => '{n} Split-Buchungen mit mehreren Quellkonten (braucht den Multisource-Fork)',
         'sum.clearing'    => '{n} Buchungen ohne Bestandskonto laufen über das Umbuchungskonto',
+        'sum.selfflow'    => '{n} Buchungen bewegen Geld von einem Konto auf dasselbe Konto: je zwei verknüpfte Buchungen über das Umbuchungskonto',
         'sum.opening'     => 'Konten mit Anfangssaldo: {n}',
         'sum.skipped'     => 'Übersprungen: {n} × {reason}',
         'sum.not_imported'=> 'Nicht importiert (gibt es in Firefly nicht): {list}',
@@ -1929,6 +1930,7 @@ function textsEn(): array
         'sum.mapping'     => 'Mapping: {asset} asset accounts, {liability} liabilities, {category} categories with transactions',
         'sum.multisource' => '{n} split transactions with several source accounts (need the multisource fork)',
         'sum.clearing'    => '{n} transactions without asset account go through the clearing account',
+        'sum.selfflow'    => '{n} transactions move money from an account to itself: two linked transactions each via the clearing account',
         'sum.opening'     => 'Accounts with opening balance: {n}',
         'sum.skipped'     => 'Skipped: {n} × {reason}',
         'sum.not_imported'=> 'Not imported (no Firefly equivalent): {list}',
@@ -3234,9 +3236,15 @@ function renderSummary(sum, job) {
     t('sum.mapping', {asset: n(mp.asset), liability: n(mp.liability), category: n(mp.category)}),
   ];
   if (imp.multisource) facts.push(t('sum.multisource', {n: n(imp.multisource)}));
+  // a fact with an expandable list of the affected transactions
+  const listFact = (text, list, total) => (list || []).length
+    ? el('details', {}, el('summary', {}, text), el('ol', {class: 'small'}, list.map(x => el('li', {}, x))),
+        total > list.length ? el('div', {class: 'muted small'}, t('sum.warn_more', {n: n(total - list.length)})) : null)
+    : text;
   if (imp.clearing) facts.push(t('sum.clearing', {n: n(imp.clearing)}));
+  if (imp.selfflow) facts.push(listFact(t('sum.selfflow', {n: n(imp.selfflow)}), sum.selfflows, (sum.selfflows || []).length));
   if (sum.opening_balances) facts.push(t('sum.opening', {n: n(sum.opening_balances)}));
-  for (const [r, c] of Object.entries(sum.skipped || {})) facts.push(t('sum.skipped', {n: n(c), reason: SKIP(r)}));
+  for (const [r, c] of Object.entries(sum.skipped || {})) facts.push(listFact(t('sum.skipped', {n: n(c), reason: SKIP(r)}), (sum.skipped_tx || {})[r], c));
   const other = Object.entries(sum.not_imported || {}).map(([k, c]) => `${n(c)} ${OTHER(k)}`);
   if (other.length) facts.push(t('sum.not_imported', {list: other.join(', ')}));
   facts.push(t('sum.rules', {rules: n(cp.rules), sugg: n(cp.suggestions)}));

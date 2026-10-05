@@ -236,6 +236,9 @@ check('repayment is a withdrawal to the liability', 'withdrawal(Girokonto>Eltern
 check('DEM -> EUR transfer (trading accounts)', 'transfer(DM>Bargeld 20.00DEM/10.23EUR)' === $s(11), $s(11));
 check('DEM purchase, EUR expense account', 'withdrawal(DM>@(diverse) 42.44DEM/21.70EUR [Lebensmittel])' === $s(12), $s(12));
 check('zero transaction skipped', null !== $plans[13]->skip);
+$stats = $p->stats();
+check('skipped transactions listed per reason', [] !== ($stats['skippedTx'] ?? []) && array_keys($stats['skipped']) === array_keys($stats['skippedTx'])
+    && array_sum($stats['skipped']) === array_sum(array_map('count', $stats['skippedTx'])) && str_contains(implode("\n", array_merge(...array_values($stats['skippedTx']))), $plans[13]->tx->date), json_encode($stats['skippedTx'] ?? null));
 check('zero split kept as memo', str_contains(journals($plans[14])[0]->notes, 'GnuCash-Memo [Kategorie: Lebensmittel 0.00]: Ketchup'), journals($plans[14])[0]->notes);
 check('same account on both sides: two linked transactions via clearing', 'withdrawal(Gutscheine>@(diverse) 11.04EUR [Lebensmittel]) + transfer(Gutscheine>Girokonto 151.60EUR) + transfer(Gutscheine>CLR 3.76EUR) + transfer(CLR>Gutscheine 3.76EUR)' === $s(15), $s(15));
 check('self transfer: halves marked, no drop warning', [false, false, true, true] === array_map(static fn ($g) => $g->self, $plans[15]->groups)
