@@ -1,3 +1,18 @@
+> [!IMPORTANT]
+> ## Archived – replaced by [gnubook](https://github.com/Simon0Harms/gnubook)
+>
+> This tool is **no longer maintained** and the repository is read-only.
+> It was written to move data between GnuCash and Firefly III. Instead of syncing two systems,
+> **[gnubook](https://github.com/Simon0Harms/gnubook)** keeps the GnuCash book as the single source of
+> truth:
+>
+> - a Firefly-style web frontend that reads and writes the GnuCash book in PostgreSQL directly;
+> - GnuCash Desktop keeps working on the same book;
+> - bank import via [firefly-iii-fints-importer](https://github.com/bnw/firefly-iii-fints-importer).
+>
+> Existing GnuCash files can be uploaded in gnubook (*Bücher → Neues Buch anlegen*) or moved into
+> PostgreSQL with GnuCash's *Speichern unter → postgres*.
+
 # firefly-gnucash – GnuCash import and export for Firefly III
 
 `firefly-gnucash.php` moves bookkeeping between **GnuCash** and **Firefly III**:
